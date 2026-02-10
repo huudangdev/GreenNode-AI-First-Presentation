@@ -1,0 +1,2262 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>V2 - PM's Deep Dive: GreenNode PostgreSQL</title>
+
+    <!-- Mermaid v9.4.3 UMD (ổn định) -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@9.4.3/dist/mermaid.min.js"></script>
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --primary-green: #0F5132; /* Deep forest green */
+            --accent-green: #198754; /* Vibrant green for actions */
+            --accent-teal: #20c997; /* Modern teal accent */
+            --dark-bg: #0a0c10; /* Very dark background */
+            --card-bg: #ffffff;
+            --text-heading: #1a1d20;
+            --text-body: #495057;
+            --light-gray: #f8f9fa;
+            --border-color: #e9ecef;
+            --shadow-sm: 0 2px 4px rgba(0,0,0,0.05);
+            --shadow-md: 0 4px 6px rgba(0,0,0,0.05), 0 10px 15px rgba(0,0,0,0.1);
+            --shadow-lg: 0 10px 25px rgba(0,0,0,0.1), 0 20px 48px rgba(0,0,0,0.1);
+            --radius-md: 12px;
+            --radius-lg: 24px;
+            --gradient-hero: linear-gradient(135deg, #0F5132 0%, #0d3e26 100%);
+        }
+
+        body {
+            font-family: 'Be Vietnam Pro', sans-serif;
+            background-color: #f0f2f5;
+            color: var(--text-body);
+            margin: 0;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Improved Spacing */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 60px 40px; /* Increased padding */
+        }
+
+        .section-title {
+            text-align: center;
+            margin: 100px 0 60px; /* More breathing room */
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: var(--radius-md);
+            padding: 40px; /* More internal breathing room */
+            box-shadow: var(--shadow-sm);
+            border: 1px solid rgba(0,0,0,0.03);
+            transition: transform 0.3s ease, box-shadow 0.3s ease, opacity 0.3s ease;
+            margin-bottom: 40px; /* More separation */
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            cursor: pointer; /* Indicate clickable */
+            position: relative;
+            z-index: 1;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 40px; /* Increased gap */
+        }
+
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 40px; /* Increased gap */
+        }
+
+        .grid-4 {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+        }
+
+        @media (max-width: 1024px) {
+            .grid-3, .grid-4 {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .grid-3, .grid-4 {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Focus Mode Styles */
+        body.has-focused-card {
+            overflow: hidden; /* Prevent scrolling */
+        }
+
+        .card.is-focused {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%) !important;
+            width: 90vw;
+            max-width: 1000px;
+            max-height: 90vh;
+            z-index: 1000;
+            overflow-y: auto;
+            box-shadow: var(--shadow-lg);
+            cursor: default;
+            border: 1px solid var(--accent-green);
+        }
+
+        .card.is-focused:hover {
+            transform: translate(-50%, -50%) !important;
+        }
+
+        /* Backdrop */
+        .backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(10, 12, 16, 0.8);
+            backdrop-filter: blur(8px);
+            z-index: 999;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+        }
+
+        .backdrop.is-active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        /* Hint for interaction */
+        .card::after {
+            content: '\f00e'; /* fa-magnifying-glass-plus */
+            font-family: "Font Awesome 6 Free";
+            font-weight: 900;
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            font-size: 1.2rem;
+            color: var(--accent-teal);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .card:hover::after {
+            opacity: 0.5;
+        }
+
+        .card.is-focused::after {
+            content: '\f00d'; /* fa-xmark */
+            color: var(--text-body);
+            opacity: 0.7;
+            cursor: pointer;
+        }
+        /* Presentation Mode Styles */
+        body.presentation-active {
+            overflow: hidden;
+            background-color: #0f1115; /* Darken body background */
+        }
+
+        /* 
+           SPOTLIGHT FIX: 
+           Instead of dimming parents (which hides children), we keep everything visible 
+           but cover non-active elements with a massive dark shadow emanating from the active slide.
+        */
+
+        body.presentation-active .slide-active {
+            position: relative;
+            z-index: 5000; /* High z-index to sit above everything */
+            transform: scale(1.02);
+            background-color: white; /* Ensure bg is opaque */
+            border-radius: 12px;
+            /* THE SPOTLIGHT: Huge dark shadow covering the rest of the page */
+            box-shadow: 0 0 0 100vmax rgba(5, 7, 10, 0.9), 
+                        0 20px 60px rgba(0,0,0,0.5) !important; 
+            transition: all 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            opacity: 1 !important;
+            filter: none !important;
+            pointer-events: auto;
+        }
+
+        /* Force opacity 1 on all children of active slide */
+        body.presentation-active .slide-active * {
+            opacity: 1 !important;
+            filter: none !important;
+            visibility: visible !important;
+        }
+
+        /* Special handling for Section Titles in focus */
+        body.presentation-active .section-title.slide-active {
+            background: linear-gradient(135deg, #ffffff, #f8f9fa);
+            padding: 40px;
+            border-radius: 16px;
+            text-align: center;
+        }
+
+        /* Clean up any potential conflicting styles */
+        body.presentation-active .container > *:not(.slide-active),
+        body.presentation-active section > *:not(.slide-active) {
+            /* We don't need opacity here anymore because the shadow covers them, 
+               but setting pointer-events: none is good practice. */
+            pointer-events: none;
+        }
+
+        /* Controls Bar (Hidden by default, shown by JS) */
+        #presentation-nav {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(10, 12, 16, 0.95);
+            padding: 12px 25px;
+            border-radius: 50px;
+            display: none; /* JS toggles this to flex */
+            gap: 15px;
+            align-items: center;
+            z-index: 10000;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        /* Navigation Buttons */
+        #presentation-nav button {
+            background: rgba(255,255,255,0.1);
+            border: none;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #presentation-nav button:hover {
+            background: white;
+            color: black;
+            transform: scale(1.1);
+        }
+
+        #presentation-nav #exit-btn {
+            background: rgba(231, 76, 60, 0.2);
+            color: #ff6b6b;
+            margin-left: 10px;
+        }
+
+        #presentation-nav #exit-btn:hover {
+            background: #e74c3c;
+            color: white;
+        }
+
+        /* Start Button - Always Visible Initially */
+        #start-presentation-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            z-index: 9000;
+            background: var(--primary-green);
+            color: white;
+            padding: 15px 25px;
+            border-radius: 50px;
+            box-shadow: 0 10px 20px rgba(22, 160, 133, 0.4);
+            border: none;
+            font-weight: 700;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        #start-presentation-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 15px 30px rgba(22, 160, 133, 0.6);
+            background: #1abc9c;
+        }
+
+        #slide-counter {
+            font-family: 'Be Vietnam Pro', sans-serif;
+            font-weight: 600;
+            color: rgba(255,255,255,0.9);
+            min-width: 60px;
+            text-align: center;
+            font-size: 1.1em;
+            letter-spacing: 0.5px;
+        }
+        
+        /* End Screen Styles */
+        #end-screen {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle at center, #0f4d30, #0a0c10);
+            z-index: 9000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+            color: white;
+            text-align: center;
+            overflow: hidden;
+        }
+
+        #end-screen::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: url('https://www.transparenttextures.com/patterns/carbon-fibre.png');
+            opacity: 0.1;
+            pointer-events: none;
+        }
+
+        #end-screen.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .end-content {
+            transform: translateY(30px);
+            transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+            max-width: 800px;
+            padding: 40px;
+            backdrop-filter: blur(10px);
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 40px;
+        }
+
+        #end-screen.active .end-content {
+            transform: translateY(0);
+        }
+
+        .end-content h1 {
+            font-size: 4.5em;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, #2ecc71, #3498db, #9b59b6);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800;
+            letter-spacing: -1px;
+        }
+
+        .end-content p {
+            font-size: 1.6em;
+            color: rgba(255, 255, 255, 0.7);
+            margin-bottom: 50px;
+            line-height: 1.4;
+        }
+
+        .end-actions {
+            display: flex;
+            gap: 25px;
+            justify-content: center;
+            margin-bottom: 50px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-green), var(--accent-teal));
+            color: white;
+            padding: 18px 40px;
+            border-radius: 50px;
+            font-weight: 700;
+            font-size: 1.1em;
+            text-decoration: none;
+            box-shadow: 0 10px 20px rgba(22, 160, 133, 0.3);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 30px rgba(22, 160, 133, 0.5);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: white;
+            padding: 18px 40px;
+            border-radius: 50px;
+            font-weight: 700;
+            font-size: 1.1em;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: white;
+            transform: translateY(-5px);
+        }
+
+        .contact-info {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 1em;
+        }
+
+        .contact-info p {
+            margin: 0;
+            font-size: 1em;
+        }        
+        /* Mobile Responsiveness */
+        @media (max-width: 768px) {
+            h1 { font-size: 2.2em !important; }
+            h2 { font-size: 1.8em !important; }
+            
+            .grid-4, .grid-3, .grid-2 {
+                grid-template-columns: 1fr !important;
+                gap: 20px !important;
+            }
+
+            .container { padding: 0 20px !important; }
+            
+            #presentation-nav {
+                width: 90%;
+                justify-content: space-between;
+                padding: 10px 15px;
+            }
+            
+            #slide-counter { font-size: 0.9em; min-width: auto; }
+            
+            #start-presentation-btn {
+                bottom: 20px; right: 20px;
+                padding: 10px 20px;
+                font-size: 0.9rem;
+            }
+            
+            .end-content h1 { font-size: 2.5em; }
+        }
+    </style>
+</head>
+<body class="presentation-mode-ready">
+    
+    <!-- Presentation Controls -->
+    <button id="start-presentation-btn">
+        <i class="fa-solid fa-play"></i> Bắt Đầu Trình Chiếu
+    </button>
+    
+    <div id="presentation-nav"> <!-- Hidden by default via CSS -->
+        <button id="prev-btn" title="Previous"><i class="fa-solid fa-arrow-left"></i></button>
+        <span id="slide-counter">1 / 20</span>
+        <button id="next-btn" title="Next"><i class="fa-solid fa-arrow-right"></i></button>
+        <div style="width: 1px; height: 20px; background: rgba(255,255,255,0.2); margin: 0 5px;"></div>
+        <button id="exit-btn" title="Exit Presentation"><i class="fa-solid fa-times"></i></button>
+    </div>
+<div class="container">
+    <!-- HERO: AI-FIRST VISION -->
+    <section id="hero-ai-first" style="background: linear-gradient(135deg, rgba(22, 160, 133, 0.05), rgba(52, 152, 219, 0.05)); padding: 80px 20px;">
+        <div class="container" style="max-width: 1200px; margin: 0 auto; text-align: center;">
+            <h1 style="font-size: 3.5em; margin-bottom: 20px; background: linear-gradient(135deg, #16A085, #3498DB); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;">
+                GreenNode: Nền Tảng AI Cloud<br/>Tiên Phong Tại Việt Nam & SEA
+            </h1>
+            <p style="font-size: 1.5em; color: var(--text-body); margin-bottom: 40px; max-width: 900px; margin-left: auto; margin-right: auto;">
+                Từ hạ tầng đến dịch vụ AI - Xây dựng, đổi mới và mở rộng quy mô nhanh chóng trên nền tảng đám mây an toàn, tuân thủ dữ liệu khu vực.
+            </p>
+            
+            <div class="grid-4" style="gap: 30px; margin-top: 50px;">
+                <div class="stat-card" style="padding: 30px; background: white; border-radius: 16px; box-shadow: var(--shadow-md);">
+                    <div style="font-size: 3em; color: var(--primary-green); font-weight: 700;">1000+</div>
+                    <div style="margin-top: 10px; color: var(--text-body);">Doanh nghiệp Digital-native</div>
+                </div>
+                <div class="stat-card" style="padding: 30px; background: white; border-radius: 16px; box-shadow: var(--shadow-md);">
+                    <div style="font-size: 3em; color: var(--accent-teal); font-weight: 700;">06</div>
+                    <div style="margin-top: 10px; color: var(--text-body);">Vùng khả dụng (VN + TH)</div>
+                </div>
+                <div class="stat-card" style="padding: 30px; background: white; border-radius: 16px; box-shadow: var(--shadow-md);">
+                    <div style="font-size: 3em; color: #F39C12; font-weight: 700;">20+</div>
+                    <div style="margin-top: 10px; color: var(--text-body);">AI Models sẵn sàng (MaaS)</div>
+                </div>
+                <div class="stat-card" style="padding: 30px; background: white; border-radius: 16px; box-shadow: var(--shadow-md);">
+                    <div style="font-size: 3em; color: #E74C3C; font-weight: 700;">24/7</div>
+                    <div style="margin-top: 10px; color: var(--text-body);">Hỗ trợ địa phương (VN/TH)</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- PLATFORM STACK OVERVIEW -->
+    <section id="platform-stack">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-layer-group"></i> Hệ Sinh Thái GreenNode: Từ Hạ Tầng Đến Ứng Dụng AI</h2>
+            <p>Nền tảng AI Cloud toàn diện 3 lớp - Infrastructure, AI Platform, và Managed Services - vận hành thống nhất với một tài khoản billing, SSO và tuân thủ quy định khu vực.</p>
+        </div>
+
+        <div class="card">
+            <h3>Kiến Trúc 3 Lớp: Toàn Diện & Tích Hợp Sâu</h3>
+            
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; margin-top: 30px;">
+                <!-- Layer 1: Infrastructure -->
+                <div style="padding: 30px; background: linear-gradient(135deg, rgba(22, 160, 133, 0.08), rgba(255,255,255,0)); border: 2px solid var(--primary-green); border-radius: 16px;">
+                    <h4 style="color: var(--primary-green); margin-bottom: 20px;">
+                        <i class="fa-solid fa-server"></i> Layer 1: Infrastructure (IaaS)
+                    </h4>
+                    <ul style="line-height: 2.2;">
+                        <li><strong>GPU Cloud:</strong> NVIDIA H100/A100, giá từ $2.34/h, tùy chỉnh cấu hình GPU/CPU/RAM</li>
+                        <li><strong>vServer:</strong> Máy chủ ảo Cloud hiệu năng cao</li>
+                        <li><strong>vStorage:</strong> Lưu trữ Object/Block tốc độ cao cho dữ liệu training</li>
+                        <li><strong>Kubernetes (VKS):</strong> Quản lý Container tự động cho AI scaling</li>
+                        <li><strong>vDB:</strong> Managed Database (PostgreSQL/MySQL) ổn định</li>
+                        <li><strong>vBackup:</strong> Trung tâm sao lưu và bảo vệ dữ liệu</li>
+                    </ul>
+                    <div style="margin-top: 20px; padding: 15px; background: rgba(22, 160, 133, 0.1); border-radius: 8px;">
+                        <strong>Giá trị cốt lõi:</strong> Chi phí dự đoán được, latency nội vùng <20ms, tuân thủ nghị định 53, miễn phí truyền dữ liệu nội mạng.
+                    </div>
+                </div>
+
+                <!-- Layer 2: AI Platform -->
+                <div style="padding: 30px; background: linear-gradient(135deg, rgba(52, 152, 219, 0.08), rgba(255,255,255,0)); border: 2px solid var(--accent-teal); border-radius: 16px;">
+                    <h4 style="color: var(--accent-teal); margin-bottom: 20px;">
+                        <i class="fa-solid fa-brain"></i> Layer 2: AI Platform (PaaS)
+                    </h4>
+                    <ul style="line-height: 2.2;">
+                        <li><strong>Notebook Instance:</strong> Môi trường Jupyter 1-click có sẵn AI frameworks (PyTorch, TensorFlow)</li>
+                        <li><strong>Training & Fine-tuning:</strong> Huấn luyện model phân tán, tối ưu siêu tham số</li>
+                        <li><strong>Model Registry:</strong> Quản lý phiên bản model, truy vết nguồn gốc</li>
+                        <li><strong>Model Inferencing:</strong> Triển khai API, tự động scaling, hỗ trợ GPU</li>
+                        <li><strong>Cost Control:</strong> Giám sát chi phí theo thời gian thực</li>
+                    </ul>
+                    <div style="margin-top: 20px; padding: 15px; background: rgba(52, 152, 219, 0.1); border-radius: 8px;">
+                        <strong>Giá trị cốt lõi:</strong> Rút ngắn 60% thời gian triển khai, minh bạch chi phí, tích hợp sẵn NVIDIA NIM & Hugging Face.
+                    </div>
+                </div>
+
+                <!-- Layer 3: Model as a Service -->
+                <div style="padding: 30px; background: linear-gradient(135deg, rgba(243, 156, 18, 0.08), rgba(255,255,255,0)); border: 2px solid #F39C12; border-radius: 16px;">
+                    <h4 style="color: #F39C12; margin-bottom: 20px;">
+                        <i class="fa-solid fa-rocket"></i> Layer 3: Model as a Service (MaaS)
+                    </h4>
+                    <ul style="line-height: 2.2;">
+                        <li><strong>20+ AI Models:</strong> Chat (Llama, Mistral), Vision, Audio, Embeddings sẵn sàng sử dụng</li>
+                        <li><strong>Unified API:</strong> Chuẩn tương thích OpenAI, tích hợp dễ dàng</li>
+                        <li><strong>No-Code Playground:</strong> 7 môi trường test model trực quan</li>
+                        <li><strong>Serverless:</strong> Không cần quản lý server, chỉ trả tiền theo token</li>
+                        <li><strong>Unified Identity:</strong> Đăng nhập một lần với tài khoản VNG Cloud</li>
+                    </ul>
+                    <div style="margin-top: 20px; padding: 15px; background: rgba(243, 156, 18, 0.1); border-radius: 8px;">
+                        <strong>Giá trị cốt lõi:</strong> Time-to-market < 1 tuần, chi phí khởi đầu thấp, dễ dàng nâng cấp lên AI Platform chuyên sâu.
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Diagram: Platform Flow -->
+        <div class="card">
+            <h3>Developer Journey: Zero → Production AI trong 3 bước</h3>
+            <div style="margin-top: 30px;">
+                <canvas id="developerJourneyChart" style="max-height: 300px;"></canvas>
+            </div>
+            <div style="margin-top: 30px; padding: 25px; background: var(--light-gray); border-left: 4px solid var(--primary-green); border-radius: 8px;">
+                <h4 style="margin-top: 0;"><i class="fa-solid fa-route"></i> Typical Flow</h4>
+                <ol style="line-height: 2.2; font-size: 1.05em;">
+                    <li><strong>Experiment (MaaS):</strong> Dev sign up → test 20+ models qua Playground → chọn model phù hợp use case (e.g., chat, RAG, vision) → integrate via API trong <1 ngày.</li>
+                    <li><strong>Customize (AI Platform):</strong> Cần fine-tune model với data riêng → spin up Notebook Instance → train/fine-tune trên GPU H100 → save model to Registry → deploy Inference endpoint với auto-scale.</li>
+                    <li><strong>Scale (Infrastructure):</strong> Traffic tăng → upgrade sang GPU cluster lớn hơn, hoặc distribute workload qua Kubernetes (VKS) → integrate với vDB (PostgreSQL) cho vector storage (pgvector) → backup qua vBackup.</li>
+                </ol>
+                <p style="margin-top: 20px; font-weight: 600; color: var(--primary-green);">
+                    → Toàn bộ journey diễn ra trong 1 platform, 1 billing account, 1 SSO, 1 support channel (Zalo/Telegram).
+                </p>
+            </div>
+        </div>
+    </section>
+
+    <!-- MARKET SIZING -->
+    <section id="market-sizing">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-chart-line"></i> Quy Mô Thị Trường & Cơ Hội (TAM/SAM/SOM)</h2>
+            <p>Phân tích từ toàn cầu đến khu vực và Việt Nam, xác định "where to play" và tiềm năng doanh thu.</p>
+        </div>
+
+        <div class="card">
+            <h3>Từ Global đến Vietnam: Roadmap Thị Trường</h3>
+            <p>Thị trường Cloud Database & DBaaS toàn cầu đang tăng trưởng mạnh mẽ với CAGR ~16–20%, từ 20–22 tỷ USD (2024) lên 50–80+ tỷ USD (2030). PostgreSQL chiếm ~17% thị phần RDBMS và là database được developer ưa chuộng nhất (49–56% theo Stack Overflow 2024–2025).</p>
+            
+            <table style="margin-top: 30px;">
+                <thead>
+                    <tr>
+                        <th>Lớp Thị Trường</th>
+                        <th>Low (USD)</th>
+                        <th>Base (USD)</th>
+                        <th>High (USD)</th>
+                        <th>Nguồn</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Global Cloud DBaaS 2030</strong></td>
+                        <td>50.0 Bn</td>
+                        <td>65.0 Bn</td>
+                        <td>80.0 Bn</td>
+                        <td>Grand View, Mordor, NextMSC</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Global Managed PostgreSQL 2033</strong></td>
+                        <td>4.6 Bn</td>
+                        <td>4.6 Bn</td>
+                        <td>4.6 Bn</td>
+                        <td>ResearchIntelo</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Global SME Cloud DBaaS 2030</strong></td>
+                        <td>24.9 Bn</td>
+                        <td>24.9 Bn</td>
+                        <td>24.9 Bn</td>
+                        <td>Grand View (segment data)</td>
+                    </tr>
+                    <tr style="background-color: rgba(22, 160, 133, 0.1);">
+                        <td><strong>APAC Cloud DBaaS 2030</strong></td>
+                        <td>15.0 Bn</td>
+                        <td>17.5 Bn</td>
+                        <td>20.0 Bn</td>
+                        <td>KBV, OMR Global (estimate)</td>
+                    </tr>
+                    <tr style="background-color: rgba(22, 160, 133, 0.15);">
+                        <td><strong>Vietnam Cloud DBaaS 2030</strong></td>
+                        <td>300 Mn</td>
+                        <td>350 Mn</td>
+                        <td>400 Mn</td>
+                        <td>Extrapolation từ APAC + VN DC market</td>
+                    </tr>
+                    <tr style="background-color: rgba(22, 160, 133, 0.25); font-weight: 600;">
+                        <td><strong>Vietnam Managed PostgreSQL 2030 (TAM)</strong></td>
+                        <td>45 Mn</td>
+                        <td>52.5 Mn</td>
+                        <td>60 Mn</td>
+                        <td>15% của VN Cloud DBaaS (Postgres share)</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div style="margin-top: 30px; padding: 20px; background-color: var(--light-gray); border-left: 4px solid var(--primary-green); border-radius: 8px;">
+                <h4 style="margin-top: 0;"><i class="fa-solid fa-bullseye"></i> Định Vị GreenNode (SOM Target)</h4>
+                <p><strong>SAM (Serviceable Addressable Market):</strong> SME segment trong Vietnam Managed PostgreSQL ~ <strong>60–70% của TAM</strong> = <strong>31.5–42 triệu USD (2030)</strong>.</p>
+                <p><strong>SOM (Serviceable Obtainable Market):</strong> GreenNode đặt mục tiêu chiếm <strong>5–10% Vietnam Managed PostgreSQL trong 3–5 năm</strong> = <strong>2–5 triệu USD ARR</strong>, tập trung vào:</p>
+                <ul style="margin-left: 20px;">
+                    <li><strong>BFSI & Fintech (~25% TAM = 13M USD):</strong> Yêu cầu tuân thủ Nghị định 53, audit log, PITR.</li>
+                    <li><strong>Retail & E-commerce (~15–20% TAM = 7–10M USD):</strong> Latency thấp cho flash-sale, egress-free data transfer.</li>
+                    <li><strong>Government & Public Sector (~10–12%):</strong> Data residency 100% VN, hóa đơn VAT.</li>
+                </ul>
+                <p><strong>Phase 2 expansion:</strong> Mở region Thailand (Q2 initiative) để unlock <strong>SEA/APAC Cloud DBaaS 15–20 tỷ USD</strong>, targeting startup corridors (Bangkok, Jakarta, Manila).</p>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Breakdown theo Ngành (Vertical Segmentation)</h3>
+            <p>Dựa trên pattern global/APAC từ Mordor Intelligence, MarketsandMarkets, GMI:</p>
+            <div style="height: 400px;">
+                 <canvas id="verticalBreakdownChart"></canvas>
+            </div>
+        </div>
+    </section>
+
+    <!-- AI PLATFORM FEATURES -->
+    <section id="ai-platform-features">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-wand-magic-sparkles"></i> GreenNode AI Platform: Tự Động Hóa ML Lifecycle</h2>
+            <p>Quy trình khép kín từ Notebook → Training → Registry → Inference trên một nền tảng thống nhất, dễ sử dụng.</p>
+        </div>
+
+        <!-- Feature Grid -->
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 30px;">
+            
+            <!-- Feature 1: Notebook Instance -->
+            <div class="card" style="border-left: 4px solid var(--primary-green);">
+                <h3><i class="fa-solid fa-laptop-code"></i> Notebook Instance: Môi Trường AI 1-Click</h3>
+                <p><strong>Vấn đề:</strong> Dev tốn 2–4 giờ để setup môi trường (cài CUDA, PyTorch, xử lý xung đột dependencies).</p>
+                <p><strong>Giải pháp GreenNode:</strong> Image được cấu hình sẵn, 1 click để khởi tạo Jupyter/VS Code.</p>
+                <ul style="line-height: 2;">
+                    <li>✓ Tích hợp sẵn PyTorch 2.x, TensorFlow 2.x, JAX, Hugging Face</li>
+                    <li>✓ Tối ưu hóa CUDA 12.x, cuDNN, NCCL</li>
+                    <li>✓ Lưu trữ liên tục (Persistent storage), tích hợp Git, SSH</li>
+                    <li>✓ Tùy chọn OS linh hoạt: Ubuntu 20.04/22.04, Rocky Linux</li>
+                </ul>
+                <div style="margin-top: 20px; padding: 15px; background: rgba(22, 160, 133, 0.1); border-radius: 8px;">
+                    <strong>Hiệu quả:</strong> Giảm thời gian "Time-to-first-experiment" từ hàng giờ xuống < 5 phút → tăng tốc độ phát triển lên 48 lần.
+                </div>
+            </div>
+
+            <!-- Feature 2: Training & Fine-tuning -->
+            <div class="card" style="border-left: 4px solid var(--accent-teal);">
+                <h3><i class="fa-solid fa-graduation-cap"></i> Training & Fine-tuning: Phân Tán & Tối Ưu</h3>
+                <p><strong>Vấn đề:</strong> Training model lớn trên 1 GPU rất chậm, việc tinh chỉnh tham số thủ công (manual tuning) tốn kém.</p>
+                <p><strong>Giải pháp GreenNode:</strong> Training phân tán đa GPU, tự động tìm kiếm tham số tối ưu (Auto-tuning).</p>
+                <ul style="line-height: 2;">
+                    <li>✓ Distributed training với PyTorch DDP, DeepSpeed, Horovod</li>
+                    <li>✓ Tích hợp Optuna/Ray Tune để tối ưu Hyperparameter</li>
+                    <li>✓ Hỗ trợ RLHF (Reinforcement Learning) cho căn chỉnh LLM</li>
+                    <li>✓ Theo dõi thí nghiệm (Experiment tracking) với MLflow, Weights & Biases</li>
+                </ul>
+                <div style="margin-top: 20px; padding: 15px; background: rgba(52, 152, 219, 0.1); border-radius: 8px;">
+                    <strong>Hiệu quả:</strong> Giảm 60–80% thời gian training, tăng độ chính xác của model thêm 5–15%.
+                </div>
+            </div>
+
+            <!-- Feature 3: Model Registry -->
+            <div class="card" style="border-left: 4px solid #9B59B6;">
+                <h3><i class="fa-solid fa-database"></i> Model Registry: Quản Lý Phiên Bản & Chuẩn Hóa</h3>
+                <p><strong>Vấn đề:</strong> Khó kiểm soát version model đang chạy production, thiếu thông tin nguồn gốc (lineage).</p>
+                <p><strong>Giải pháp GreenNode:</strong> Kho lưu trữ trung tâm để quản lý version, metadata và nguồn gốc.</p>
+                <ul style="line-height: 2;">
+                    <li>✓ Quản lý phiên bản như Git: v1.0, v1.1, rollback tức thì</li>
+                    <li>✓ Gắn thẻ Metadata: dataset sử dụng, config training, kết quả metrics</li>
+                    <li>✓ Truy vết nguồn gốc (Lineage): từ model → job → data → code</li>
+                    <li>✓ Phân quyền truy cập (RBAC) cho làm việc nhóm</li>
+                </ul>
+                <div style="margin-top: 20px; padding: 15px; background: rgba(155, 89, 182, 0.1); border-radius: 8px;">
+                    <strong>Hiệu quả:</strong> Giảm 70% thời gian debug lỗi model, đáp ứng tiêu chuẩn kiểm toán.
+                </div>
+            </div>
+            
+            <!-- Feature 4: Model Inferencing -->
+             <div class="card" style="border-left: 4px solid #F39C12;">
+                <h3><i class="fa-solid fa-bolt"></i> Model Inferencing: Tăng Tốc GPU & Auto-Scaling</h3>
+                <p><strong>Vấn đề:</strong> Triển khai model ra production phức tạp, tốn 1–2 tuần để setup API, load balancer.</p>
+                <p><strong>Giải pháp GreenNode:</strong> 1-click deploy model từ Registry ra API, tự động scale theo tải.</p>
+                <ul style="line-height: 2;">
+                    <li>✓ Tích hợp vLLM: giảm độ trễ 60% so với PyTorch thường</li>
+                    <li>✓ Auto-scaling: tự động mở rộng từ 1 lên 100 pods khi traffic tăng</li>
+                    <li>✓ Hỗ trợ đa framework: TF Serving, TorchServe, Triton</li>
+                    <li>✓ Giám sát toàn diện: Log Console, độ trễ (latency), lưu lượng (RPS)</li>
+                </ul>
+                <div style="margin-top: 20px; padding: 15px; background: rgba(243, 156, 18, 0.1); border-radius: 8px;">
+                    <strong>Hiệu quả:</strong> Time-to-production < 1 ngày, giảm 50% chi phí inference nhờ tối ưu tài nguyên.
+                </div>
+            </div>
+        </div>
+
+        <!-- Comparison Table: GreenNode AI Platform vs Self-Managed -->
+        <div class="card">
+            <h3>So Sánh: GreenNode AI Platform vs Self-Managed Infrastructure</h3>
+            <table>
+                <thead>
+                    <tr style="background-color: var(--primary-green); color: white;">
+                        <th>Aspect</th>
+                        <th>Self-Managed (AWS EC2 + K8s + Custom)</th>
+                        <th>GreenNode AI Platform</th>
+                        <th>Delta</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Setup Time (Notebook → Inference)</strong></td>
+                        <td>2–4 tuần (setup infra, CI/CD, monitoring)</td>
+                        <td><5 ngày (1-click components)</td>
+                        <td style="color: var(--primary-green); font-weight: 600;">75% faster</td>
+                    </tr>
+                    <tr>
+                        <td><strong>DevOps Overhead</strong></td>
+                        <td>1–2 FTE dedicated cho ML infra</td>
+                        <td>~0.2 FTE (platform quản lý)</td>
+                        <td style="color: var(--primary-green); font-weight: 600;">80% reduction</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Training Cost (8xH100, 100h)</strong></td>
+                        <td>~$1,900 (AWS p5.48xlarge on-demand)</td>
+                        <td>~$1,400 (GreenNode GPU Cloud)</td>
+                        <td style="color: var(--primary-green); font-weight: 600;">26% cheaper</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Inference Latency (LLM 7B)</strong></td>
+                        <td>~200ms (vanilla PyTorch)</td>
+                        <td>~80ms (vLLM optimized)</td>
+                        <td style="color: var(--primary-green); font-weight: 600;">60% faster</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Monitoring & Logging</strong></td>
+                        <td>Setup Prometheus, Grafana, ELK manually</td>
+                        <td>Built-in Log Console, metrics dashboard</td>
+                        <td style="color: var(--primary-green); font-weight: 600;">Zero setup</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Compliance (ND53, GDPR)</strong></td>
+                        <td>Customer phải tự audit, report</td>
+                        <td>Platform compliant, audit log sẵn</td>
+                        <td style="color: var(--primary-green); font-weight: 600;">Turnkey compliance</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- MAAS: MODEL AS A SERVICE -->
+    <section id="maas-deep-dive">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-cubes"></i> Model as a Service: 20+ Models, Zero Infrastructure, Unified API</h2>
+            <p>Serverless AI models cho chat, tạo nội dung, xử lý ảnh, âm thanh - sẵn sàng production chỉ trong vài phút, không cần quản lý GPU.</p>
+        </div>
+
+        <!-- MaaS Value Props -->
+        <div class="card">
+            <h3>MaaS Value Proposition: Từ Idea → Production AI trong <1 Tuần</h3>
+            <div class="grid-2" style="gap: 30px;">
+                <div>
+                    <h4 style="color: var(--primary-green);">Vấn Đề (Pain Points) MaaS Giải Quyết</h4>
+                    <ul style="line-height: 2.2;">
+                        <li><strong>Time-to-market dài:</strong> Tự build model mất 3–6 tháng (thu thập data, training, setup hạ tầng).</li>
+                        <li><strong>Chi phí hạ tầng cao:</strong> Thuê GPU cluster tốn $5K–20K/tháng, lãng phí tài nguyên khi không dùng (idle).</li>
+                        <li><strong>Phức tạp vận hành (DevOps):</strong> Cần 1–2 nhân sự chuyên trách để vận hành ML pipeline (scaling, monitoring).</li>
+                        <li><strong>Rủi ro phụ thuộc (Vendor lock-in):</strong> Dùng OpenAI API khó kiểm soát model, giá tăng, bị giới hạn rate limit.</li>
+                    </ul>
+                </div>
+                <div>
+                    <h4 style="color: var(--accent-teal);">Giải Pháp GreenNode MaaS</h4>
+                    <ul style="line-height: 2.2;">
+                        <li><strong>20+ Models sẵn sàng:</strong> Llama 3.x, Mistral, Qwen, CLIP, Whisper, BLIP, Embeddings.</li>
+                        <li><strong>Unified API (OpenAI-compatible):</strong> Chuyển từ OpenAI sang GreenNode chỉ cần đổi `base_url`.</li>
+                        <li><strong>Serverless & Pay-per-token:</strong> Tự động scale 0 → 100 requests/s, chỉ trả tiền cho token sử dụng.</li>
+                        <li><strong>7 No-Code Playgrounds:</strong> Test model trực quan trước khi viết code, demo inference ngay lập tức.</li>
+                        <li><strong>Triển khai nội vùng:</strong> Model host tại VN/TH (latency <50ms), tuân thủ quy định dữ liệu.</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- MaaS Model Catalog -->
+        <div class="card">
+            <h3>Model Catalog: 20+ Models Across 7 Categories</h3>
+            <div style="overflow-x: auto; margin-top: 20px;">
+                <table style="min-width: 1000px;">
+                    <thead>
+                        <tr style="background-color: var(--primary-green); color: white;">
+                            <th>Category</th>
+                            <th>Models</th>
+                            <th>Use Cases</th>
+                            <th>Pricing (per 1M tokens)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Chat LLMs</strong></td>
+                            <td>Llama 3.1 (8B/70B), Mistral 7B, Qwen 2.5</td>
+                            <td>Chatbot, CSKH, trợ lý ảo</td>
+                            <td>$0.15 – $0.80</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Text Generation</strong></td>
+                            <td>GPT-J, BLOOM, Falcon</td>
+                            <td>Viết nội dung, tóm tắt văn bản, tạo code</td>
+                            <td>$0.10 – $0.50</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Embeddings</strong></td>
+                            <td>Sentence-BERT, E5, BGE</td>
+                            <td>Tìm kiếm ngữ nghĩa (Semantic search), RAG, phân cụm</td>
+                            <td>$0.05 – $0.20</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Vision (Image)</strong></td>
+                            <td>CLIP, BLIP-2, ViT</td>
+                            <td>Mô tả ảnh (Captioning), tìm kiếm hình ảnh, OCR</td>
+                            <td>$0.30 – $1.00</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Speech (Audio)</strong></td>
+                            <td>Whisper (tiny/base/large)</td>
+                            <td>Chuyển giọng nói thành văn bản (STT), voice commands</td>
+                            <td>$0.20 – $0.60</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Multimodal</strong></td>
+                            <td>LLaVA, CogVLM</td>
+                            <td>Hỏi đáp trên hình ảnh (Visual Q&A), suy luận đa phương thức</td>
+                            <td>$0.80 – $2.00</td>
+                        </tr>
+                        <tr>
+                            <td><strong>NVIDIA NIM</strong></td>
+                            <td>NIM-optimized Llama, Mistral</td>
+                            <td>Inference cấp doanh nghiệp, thông lượng cao (high throughput)</td>
+                            <td>$1.00 – $3.00</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p style="margin-top: 20px; font-style: italic; color: var(--text-body);">
+                <strong>Lưu ý:</strong> Giá trên là ước tính, thực tế phụ thuộc vào độ dài input/output token. Tất cả model đều có gói miễn phí (Free Tier 1–5M tokens/tháng) cho testing.
+            </p>
+        </div>
+
+        <!-- Playground Screenshots (giả lập) -->
+        <div class="card">
+            <h3>7 No-Code Playgrounds: Test Models Không Cần Code</h3>
+            <div class="grid-3" style="gap: 20px; margin-top: 30px;">
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px; text-align: center;">
+                    <div style="height: 200px; background: linear-gradient(135deg, #16A085, #3498DB); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 3em;">
+                        💬
+                    </div>
+                    <h4 style="margin-top: 15px;">Chat Playground</h4>
+                    <p style="color: var(--text-body); font-size: 0.95em;">Test model Chat đa lượt hội thoại, tinh chỉnh temperature.</p>
+                </div>
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px; text-align: center;">
+                    <div style="height: 200px; background: linear-gradient(135deg, #F39C12, #E74C3C); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 3em;">
+                        ✍️
+                    </div>
+                    <h4 style="margin-top: 15px;">Text Generation</h4>
+                    <p style="color: var(--text-body); font-size: 0.95em;">Tạo nội dung dài, điều chỉnh tham số max_tokens, top_p.</p>
+                </div>
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px; text-align: center;">
+                    <div style="height: 200px; background: linear-gradient(135deg, #9B59B6, #E91E63); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 3em;">
+                        🖼️
+                    </div>
+                    <h4 style="margin-top: 15px;">Vision Playground</h4>
+                    <p style="color: var(--text-body); font-size: 0.95em;">Upload ảnh → nhận mô tả (caption), hỏi đáp về hình ảnh.</p>
+                </div>
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px; text-align: center;">
+                    <div style="height: 200px; background: linear-gradient(135deg, #1ABC9C, #16A085); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 3em;">
+                        🎤
+                    </div>
+                    <h4 style="margin-top: 15px;">Speech Playground</h4>
+                    <p style="color: var(--text-body); font-size: 0.95em;">Upload audio/video → chuyển thành văn bản với Whisper.</p>
+                </div>
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px; text-align: center;">
+                    <div style="height: 200px; background: linear-gradient(135deg, #3498DB, #2980B9); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 3em;">
+                        🔍
+                    </div>
+                    <h4 style="margin-top: 15px;">Embeddings Playground</h4>
+                    <p style="color: var(--text-body); font-size: 0.95em;">Tạo vector embeddings cho tìm kiếm, tính điểm tương đồng.</p>
+                </div>
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px; text-align: center;">
+                    <div style="height: 200px; background: linear-gradient(135deg, #E67E22, #D35400); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 3em;">
+                        🧠
+                    </div>
+                    <h4 style="margin-top: 15px;">Multimodal Playground</h4>
+                    <p style="color: var(--text-body); font-size: 0.95em;">Kết hợp Hình ảnh + Văn bản → suy luận phức tạp.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- MaaS Business Impact -->
+        <div class="card">
+            <h3>Business Impact: MaaS Là PLG Engine & Revenue Driver</h3>
+            <div style="padding: 25px; background: linear-gradient(135deg, rgba(22, 160, 133, 0.05), rgba(52, 152, 219, 0.05)); border-radius: 12px;">
+                <h4 style="color: var(--primary-green); margin-top: 0;">1. PLG Acquisition Funnel</h4>
+                <p style="line-height: 1.9;">
+                    <strong>Top of funnel:</strong> Developer search "open source LLM API" → tìm GreenNode blog/docs → sign up free tier (1M tokens free) → test trong Playground → integrate API trong <1 ngày.<br/>
+                    <strong>Conversion:</strong> Free tier → Paid ($0.15/M tokens onwards) khi usage vượt quota. Conversion rate target: <strong>30–40%</strong> (comparable với OpenAI, Anthropic).<br/>
+                    <strong>CAC:</strong> MaaS channel CAC ~<strong>$50–80 USD</strong> (SEO + content marketing + community), thấp nhất trong mix 3 channels.
+                </p>
+
+                <h4 style="color: var(--accent-teal); margin-top: 25px;">2. Cross-Sell & Upsell Path</h4>
+                <ul style="line-height: 2.2;">
+                    <li><strong>MaaS → AI Platform:</strong> User cần fine-tune model với data riêng → upsell Notebook + Training ($200–500/month).</li>
+                    <li><strong>AI Platform → GPU Cloud:</strong> Training job lớn hơn → upsell GPU H100 cluster ($2.34/h × 8 GPUs × 100h = ~$1,900/job).</li>
+                    <li><strong>GPU/AI Platform → vDB:</strong> Model cần vector storage cho RAG → cross-sell PostgreSQL với pgvector (Pro tier $199/month).</li>
+                </ul>
+                <p style="margin-top: 15px; font-weight: 600; color: var(--primary-green);">
+                    → NRR (Net Revenue Retention) target: <strong>>110%</strong> nhờ cross-sell path này. MaaS là "landing product", AI Platform & Infrastructure là "expansion products".
+                </p>
+
+                <h4 style="color: #F39C12; margin-top: 25px;">3. Competitive Moat</h4>
+                <ul style="line-height: 2.2;">
+                    <li><strong>Regional latency:</strong> Models hosted VN/TH → latency <50ms (vs OpenAI ~200ms từ US West).</li>
+                    <li><strong>Data residency:</strong> Data không rời khỏi SEA → compliant với ND53, PDPA (TH), upcoming SEA data laws.</li>
+                    <li><strong>Local payment:</strong> Billing VND/THB, VAT invoice, bank transfer (không bắt buộc credit card như OpenAI).</li>
+                    <li><strong>Model diversity:</strong> 20+ models (OpenAI chỉ có GPT family) → customer không bị lock vào 1 provider.</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- MaaS vs Competitors Chart -->
+        <div class="card">
+            <h3>So Sánh: GreenNode MaaS vs OpenAI/Anthropic/AWS Bedrock</h3>
+            <div style="height: 400px;">
+                <canvas id="maasComparisonChart"></canvas>
+            </div>
+        </div>
+    </section>
+
+    <!-- GPU CLOUD -->
+    <section id="gpu-cloud-benchmarks">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-microchip"></i> GPU Cloud: NVIDIA H100/A100 Tối Ưu Cho AI</h2>
+            <p>Cấu hình tùy chỉnh, tốc độ nhanh gấp 30 lần, tiết kiệm 75% chi phí so với Hyperscalers.</p>
+        </div>
+
+        <!-- GPU Specs Table -->
+        <div class="card">
+            <h3>Cấu Hình & Bảng Giá GPU Cloud</h3>
+            <table>
+                <thead>
+                    <tr style="background-color: var(--primary-green); color: white;">
+                        <th>Loại GPU (GPU Type)</th>
+                        <th>VRAM</th>
+                        <th>CUDA Cores</th>
+                        <th>Tensor Cores</th>
+                        <th>Ứng Dụng Điển Hình</th>
+                        <th>Đơn Giá (USD/giờ)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>NVIDIA H100 SXM5</strong></td>
+                        <td>80GB HBM3</td>
+                        <td>16,896</td>
+                        <td>528 (Gen 4)</td>
+                        <td>Huấn luyện LLM (Model 70B+), inference quy mô lớn</td>
+                        <td><strong>$2.34</strong></td>
+                    </tr>
+                    <tr>
+                        <td><strong>NVIDIA A100 80GB</strong></td>
+                        <td>80GB HBM2e</td>
+                        <td>6,912</td>
+                        <td>432 (Gen 3)</td>
+                        <td>Fine-tuning LLM (7B–13B), Computer Vision</td>
+                        <td><strong>$1.80</strong></td>
+                    </tr>
+                    <tr>
+                        <td><strong>NVIDIA A100 40GB</strong></td>
+                        <td>40GB HBM2</td>
+                        <td>6,912</td>
+                        <td>432 (Gen 3)</td>
+                        <td>Model cỡ vừa, Prototyping, Inference</td>
+                        <td><strong>$1.20</strong></td>
+                    </tr>
+                </tbody>
+            </table>
+            <p style="margin-top: 20px; font-style: italic; color: var(--text-body);">
+                <strong>Cấu hình tùy chọn:</strong> CPU linh hoạt (16–96 cores), RAM (128GB–1.5TB), lưu trữ NVMe (500GB–10TB). Có sẵn cụm Multi-GPU (2x, 4x, 8x H100).
+            </p>
+        </div>
+
+        <!-- Performance Benchmarks -->
+        <div class="card">
+            <h3>Performance Benchmarks: GreenNode vs AWS/Azure/GCP</h3>
+            <div style="height: 400px;">
+                <canvas id="gpuBenchmarkChart"></canvas>
+            </div>
+            <div style="margin-top: 30px; padding: 20px; background: var(--light-gray); border-radius: 12px;">
+                <h4 style="margin-top: 0;"><i class="fa-solid fa-chart-line"></i> Benchmark Details</h4>
+                <ul style="line-height: 2.2;">
+                    <li><strong>LLM Training (Llama 3 8B, 100 epochs):</strong> GreenNode H100 8x: <strong>12 hours</strong> vs AWS p5.48xlarge: 14 hours (17% faster).</li>
+                    <li><strong>Inference Throughput (Mistral 7B, batch size 32):</strong> GreenNode vLLM: <strong>1,200 tokens/sec</strong> vs AWS SageMaker: 850 tokens/sec (41% faster).</li>
+                    <li><strong>Cost per Training Job (100 GPU-hours):</strong> GreenNode: <strong>$1,872</strong> vs AWS: $2,600 (28% cheaper).</li>
+                    <li><strong>Network Latency (VN region):</strong> GreenNode HCM/HN: <strong>5–8ms</strong> vs AWS Singapore: 20–30ms (4x faster local).</li>
+                </ul>
+                <p style="margin-top: 20px; font-weight: 600; color: var(--primary-green);">
+                    → Benchmark source: Internal tests (Jan 2026), MLPerf Training v3.1, vLLM throughput benchmarks.
+                </p>
+            </div>
+        </div>
+    </section>
+
+    <!-- C4 MODEL -->
+    <section id="c4-model">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-sitemap"></i> Phân Tích Kiến Trúc (C4 Model)</h2>
+            <p>Mô hình C4 cung cấp cái nhìn đa chiều về kiến trúc hệ thống, từ ngữ cảnh tổng thể đến các thành phần chi tiết, đảm bảo sự hiểu biết đồng nhất giữa các bên liên quan.</p>
+        </div>
+
+        <!-- Cấp 1 -->
+        <div class="card">
+            <h3>Cấp 1: System Context Diagram (Ngữ cảnh Hệ thống)</h3>
+            <p>Mô tả tổng quan hệ thống Greennode Managed PostgreSQL DBaaS và các tác nhân bên ngoài tương tác với nó.</p>
+            <figure>
+                <div class="mermaid-container">
+                    <!-- prettier-ignore -->
+                    <div class="mermaid">
+flowchart TD
+    Dev[Backend Developer]
+    DevOps[DevOps / SRE]
+    CTO[CTO / Founder]
+
+    GN[Greennode Managed PostgreSQL DBaaS]
+
+    App[Customer Application]
+    Pay[Payment Gateway]
+    IdP[Identity Provider]
+    Ticket[Ticketing System]
+    Mon[External Monitoring]
+
+    Dev -->|Manages DB instances| GN
+    DevOps -->|Manages operations| GN
+    CTO -->|Manages billing and usage| GN
+
+    App -->|Connects to DB instances| GN
+    GN -->|Processes payments| Pay
+    GN -->|Delegates authentication| IdP
+    GN -->|Creates and updates tickets| Ticket
+    GN -->|Exports metrics| Mon
+                    </div>
+                </div>
+                <figcaption>Sơ đồ ngữ cảnh hệ thống Greennode Managed PostgreSQL DBaaS</figcaption>
+            </figure>
+            
+            <div style="margin-top: 25px; padding: 20px; background: linear-gradient(135deg, rgba(22, 160, 133, 0.05), rgba(52, 152, 219, 0.05)); border-radius: 12px;">
+                <h4 style="color: var(--text-heading); margin-bottom: 15px;">
+                    <i class="fa-solid fa-briefcase"></i> Business Context Layer
+                </h4>
+                <p><strong>Market Actors:</strong> System context không chỉ là kỹ thuật. Mỗi actor đại diện cho một vertical segment:</p>
+                <ul style="line-height: 1.9;">
+                    <li><strong>BFSI/Fintech (25% TAM ~ 13M USD):</strong> Cần audit log, PITR phút/giờ, tuân thủ ND53 → Payment Gateway, Core Banking integration.</li>
+                    <li><strong>E-commerce/Retail (17.5% ~ 9M USD):</strong> Latency <20ms cho flash-sale, egress-free transfer → Shop platform, OMS integration.</li>
+                    <li><strong>Government/Public (11% ~ 5.8M USD):</strong> Data residency 100% VN, hóa đơn VAT → eGov portal, Citizen DB integration.</li>
+                </ul>
+                <p><strong>External Systems:</strong> Ticketing System (support SLA 99.5%), Payment Gateway (MRR collection, dunning), Identity Provider (SSO enterprise), Monitoring (export metrics cho customer dashboard).</p>
+                <p style="margin-top: 15px; font-style: italic; color: var(--text-body);">
+                    → Level 1 định nghĩa <strong>"WHO pays, WHY they pay, WHAT problem DBaaS solves for each vertical"</strong>.
+                </p>
+            </div>
+        </div>
+
+        <!-- Cấp 2 -->
+        <div class="card">
+            <h3>Cấp 2: Container Diagram</h3>
+            <p>Phân rã hệ thống Greennode thành các container (ứng dụng, cơ sở dữ liệu, dịch vụ) và mối quan hệ giữa chúng.</p>
+            <figure>
+                <div class="mermaid-container">
+                    <!-- prettier-ignore -->
+                    <div class="mermaid">
+flowchart TD
+    WebConsole[Web Console]
+    APIGateway[Public API Gateway]
+    AuthService[Auth and IAM Service]
+    ProvisioningService[Provisioning Service]
+    BackupService[Backup and Restore Service]
+    MonitoringService[Monitoring and Metrics Service]
+    BillingService[Billing and Subscription Service]
+    AuditService[Audit Logging Service]
+    NotificationService[Notification Service]
+
+    ControlPlaneDB[Control Plane DB]
+    MetricsStore[Metrics Store]
+    LogStore[Log Store]
+
+    PostgresDataPlane[PostgreSQL Data Plane]
+    BackupStorage[Backup Storage]
+
+    DevC2[Backend Developer]
+    DevOpsC2[DevOps / SRE]
+    CTOC2[CTO / Founder]
+    CustomerAppC2[Customer Application]
+
+    WebConsole -->|Makes API calls| APIGateway
+    APIGateway -->|Authenticates and authorizes| AuthService
+    APIGateway -->|Delegates provisioning tasks| ProvisioningService
+    APIGateway -->|Delegates backup and restore tasks| BackupService
+    APIGateway -->|Requests metrics| MonitoringService
+    APIGateway -->|Requests billing info| BillingService
+    APIGateway -->|Sends audit events| AuditService
+
+    AuthService -->|Read and write user and org data| ControlPlaneDB
+    ProvisioningService -->|Read and write instance state| ControlPlaneDB
+    ProvisioningService -->|Provisions and decommissions DBs| PostgresDataPlane
+    BackupService -->|Read policies and write backup metadata| ControlPlaneDB
+    BackupService -->|Executes backup commands| PostgresDataPlane
+    BackupService -->|Stores and retrieves backups| BackupStorage
+    MonitoringService -->|Scrapes metrics| PostgresDataPlane
+    MonitoringService -->|Stores metrics| MetricsStore
+    MonitoringService -->|Triggers alerts| NotificationService
+    BillingService -->|Reads usage data and writes invoices| ControlPlaneDB
+    AuditService -->|Writes audit logs| LogStore
+
+    DevC2 -->|Uses| WebConsole
+    DevOpsC2 -->|Uses| WebConsole
+    CTOC2 -->|Uses| WebConsole
+    CustomerAppC2 -->|Connects to DB instances| PostgresDataPlane
+                    </div>
+                </div>
+                <figcaption>Sơ đồ Container của hệ thống Greennode Managed PostgreSQL DBaaS</figcaption>
+            </figure>
+
+            <div style="margin-top: 25px; padding: 20px; background: linear-gradient(135deg, rgba(22, 160, 133, 0.05), rgba(243, 156, 18, 0.05)); border-radius: 12px;">
+                <h4 style="color: var(--text-heading); margin-bottom: 15px;">
+                    <i class="fa-solid fa-coins"></i> Revenue & Cost Drivers
+                </h4>
+                <table style="font-size: 0.95em;">
+                    <thead>
+                        <tr style="background-color: var(--primary-green); color: white;">
+                            <th>Container</th>
+                            <th>Business Role</th>
+                            <th>Impact on Metrics</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Web Console</strong></td>
+                            <td>Kênh PLG, tự phục vụ</td>
+                            <td>Giảm CAC (50% traffic qua PLG, CAC ~100 USD), tăng Time-to-first-DB <10 phút</td>
+                        </tr>
+                        <tr>
+                            <td><strong>API Gateway</strong></td>
+                            <td>Tích hợp partner, cross-sell</td>
+                            <td>Mở đường cho VNG ecosystem (Zalo Mini App, VNG Games) → NRR >100%</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Provisioning Service</strong></td>
+                            <td>Driver MRR</td>
+                            <td>Mỗi instance = 1 unit revenue (~150 USD ARPU/tháng)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Backup & Restore</strong></td>
+                            <td>Justify premium tier</td>
+                            <td>PITR phút/giờ → Pro tier 199 USD → tăng ARPU</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Monitoring & Metrics</strong></td>
+                            <td>Nền tảng SLA 99.5–99.95%</td>
+                            <td>Giảm churn (<5%/quý), tăng NPS (≥40)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Billing Service</strong></td>
+                            <td>Cashflow & dunning</td>
+                            <td>Đảm bảo MRR thu được, payback period 2.8 tháng</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Audit & IAM</strong></td>
+                            <td>Compliance moat (ND53)</td>
+                            <td>Mở cửa vertical BFSI & Gov (38% TAM), khó copy bởi hyperscaler</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <p style="margin-top: 15px; font-weight: 500;">
+                    → Level 2 map container → <strong>revenue lever (MRR, ARPU, LTV), cost lever (CAC, churn), moat (compliance, SLA)</strong>.
+                </p>
+            </div>
+        </div>
+
+        <!-- Cấp 3 -->
+        <div class="card">
+            <h3>Cấp 3: Component Diagram (Public API Gateway)</h3>
+            <p>Chi tiết hóa các thành phần (components) bên trong Public API Gateway container, nơi xử lý logic nghiệp vụ chính.</p>
+            <figure>
+                <div class="mermaid-container">
+                    <!-- prettier-ignore -->
+                    <div class="mermaid">
+flowchart TD
+    AuthMiddleware[Auth Middleware]
+    InstanceController[Instance Controller]
+    BackupController[Backup Controller]
+    MetricsController[Metrics Controller]
+    UserController[User Controller]
+    BillingController[Billing Controller]
+
+    AuthServiceComp[Auth and IAM Service]
+    ProvisioningServiceComp[Provisioning Service]
+    BackupRestoreServiceComp[Backup and Restore Service]
+    MonitoringServiceComp[Monitoring and Metrics Service]
+    BillingSubscriptionServiceComp[Billing and Subscription Service]
+
+    AuthMiddleware --> AuthServiceComp
+    AuthMiddleware --> InstanceController
+    AuthMiddleware --> BackupController
+    AuthMiddleware --> MetricsController
+    AuthMiddleware --> UserController
+    AuthMiddleware --> BillingController
+
+    InstanceController -->|Delegates instance operations| ProvisioningServiceComp
+    BackupController -->|Delegates backup and restore operations| BackupRestoreServiceComp
+    MetricsController -->|Delegates metrics queries| MonitoringServiceComp
+    UserController -->|Delegates DB user operations| ProvisioningServiceComp
+    BillingController -->|Delegates billing queries| BillingSubscriptionServiceComp
+                    </div>
+                </div>
+                <figcaption>Sơ đồ Component của Public API Gateway</figcaption>
+            </figure>
+
+            <div style="margin-top: 25px; padding: 20px; background: linear-gradient(135deg, rgba(52, 152, 219, 0.05), rgba(155, 89, 182, 0.05)); border-radius: 12px;">
+                <h4 style="color: var(--text-heading); margin-bottom: 15px;">
+                    <i class="fa-solid fa-chart-bar"></i> Instrumentation & KPI Mapping
+                </h4>
+                <p>Mỗi API endpoint không chỉ là route, mà là <strong>điểm thu thập dữ liệu</strong> cho PM dashboard:</p>
+                <ul style="line-height: 1.9;">
+                    <li><strong>InstanceController (<code>/v1/instances</code>):</strong>
+                        <ul style="margin-left: 20px; margin-top: 8px;">
+                            <li>Event <code>instance_created</code> → đo <strong>Activation Rate</strong> (sign-up → first DB).</li>
+                            <li>Timestamp <code>created_at</code> vs <code>first_connection_at</code> → đo <strong>Time-to-first-DB <10 phút</strong>.</li>
+                        </ul>
+                    </li>
+                    <li><strong>BackupController (<code>/v1/instances/{id}/backups</code>):</strong>
+                        <ul style="margin-left: 20px; margin-top: 8px;">
+                            <li>Event <code>backup_success</code>, <code>restore_test</code> → % instances có backup ON, số lần restore thử/tháng.</li>
+                            <li>Justify <strong>Reliability metric</strong>: 0 incident mất dữ liệu.</li>
+                        </ul>
+                    </li>
+                    <li><strong>MetricsController (<code>/v1/instances/{id}/metrics</code>):</strong>
+                        <ul style="margin-left: 20px; margin-top: 8px;">
+                            <li>Query CPU/RAM/Disk usage → feed <strong>Product Health dashboard</strong>.</li>
+                            <li>Alert triggering data → SLA uptime 99.5–99.95%.</li>
+                        </ul>
+                    </li>
+                    <li><strong>BillingController (<code>/v1/billing/usage</code>):</strong>
+                        <ul style="margin-left: 20px; margin-top: 8px;">
+                            <li>Event <code>invoice_paid</code>, <code>payment_failed</code> → đo <strong>MRR, churn, dunning success rate</strong>.</li>
+                            <li>Feed <strong>Revenue & Economics dashboard</strong>.</li>
+                        </ul>
+                    </li>
+                </ul>
+                <p style="margin-top: 15px; font-weight: 500; font-style: italic;">
+                    → Level 3 thể hiện: <strong>"API nào feed vào KPI nào"</strong> trong hệ thống đo lường (Activation, Reliability, Revenue).
+                </p>
+            </div>
+        </div>
+
+        <!-- Deployment -->
+        <div class="card">
+            <h3>Sơ Đồ Triển Khai (Deployment View - Production)</h3>
+            <p>Mô tả cách các container được triển khai trên hạ tầng vật lý hoặc ảo trong môi trường Production.</p>
+            <figure>
+                <div class="mermaid-container">
+                    <!-- prettier-ignore -->
+                    <div class="mermaid">
+flowchart TD
+    DevDep[Backend Developer]
+    DevOpsDep[DevOps / SRE]
+    CTODep[CTO / Founder]
+    CustomerAppDep[Customer Application]
+
+    InternetNode[Internet Traffic]
+    k8s_cp[Kubernetes Cluster Control Plane]
+    pg_dp[PostgreSQL Cluster Nodes Data Plane]
+    managed_storage[Managed Storage Services]
+    customer_app_server[Customer App Server]
+
+    WebConsoleDep[Web Console]
+    APIGatewayDep[Public API Gateway]
+    AuthDep[Auth and IAM Service]
+    ProvDep[Provisioning Service]
+    BkpDep[Backup and Restore Service]
+    MonDep[Monitoring and Metrics Service]
+    BillDep[Billing and Subscription Service]
+    AuditDep[Audit Logging Service]
+    NotifDep[Notification Service]
+
+    CustDB[Customer PostgreSQL Instances]
+    CPDB[Control Plane DB]
+    MetricsDB[Metrics Store]
+    LogStoreDep[Log Store]
+    BackupStoreDep[Backup Storage]
+
+    DevDep -->|Uses| InternetNode
+    DevOpsDep -->|Uses| InternetNode
+    CTODep -->|Uses| InternetNode
+    CustomerAppDep -->|Connects via| customer_app_server
+
+    InternetNode -->|HTTPS / JSON| k8s_cp
+    customer_app_server -->|PostgreSQL Protocol| pg_dp
+
+    k8s_cp --> WebConsoleDep
+    k8s_cp --> APIGatewayDep
+    k8s_cp --> AuthDep
+    k8s_cp --> ProvDep
+    k8s_cp --> BkpDep
+    k8s_cp --> MonDep
+    k8s_cp --> BillDep
+    k8s_cp --> AuditDep
+    k8s_cp --> NotifDep
+
+    pg_dp --> CustDB
+
+    managed_storage --> CPDB
+    managed_storage --> MetricsDB
+    managed_storage --> LogStoreDep
+    managed_storage --> BackupStoreDep
+                    </div>
+                </div>
+                <figcaption>Sơ đồ triển khai Production cho Greennode Managed PostgreSQL DBaaS</figcaption>
+            </figure>
+
+            <div style="margin-top: 25px; padding: 20px; background: linear-gradient(135deg, rgba(26, 188, 156, 0.05), rgba(230, 126, 34, 0.05)); border-radius: 12px;">
+                <h4 style="color: var(--text-heading); margin-bottom: 15px;">
+                    <i class="fa-solid fa-globe"></i> Geographic Strategy & Revenue Mapping
+                </h4>
+                <p><strong>Phase 1 – Vietnam Region (Current):</strong></p>
+                <ul style="line-height: 1.9;">
+                    <li><strong>Target TAM:</strong> Vietnam Managed PostgreSQL ~ 45–60M USD (2030, Base 52.5M).</li>
+                    <li><strong>SOM Goal:</strong> 5–10% share = 2–5M USD ARR trong 3–5 năm.</li>
+                    <li><strong>Primary verticals:</strong> BFSI (13M), Retail (9M), Gov (5.8M) – tổng 27.8M (~53% TAM) addressable qua ND53 + latency <20ms.</li>
+                </ul>
+                <p style="margin-top: 15px;"><strong>Phase 2 – Thailand Region (Q2 2026 initiative, roadmap priority #1):</strong></p>
+                <ul style="line-height: 1.9;">
+                    <li><strong>Unlock market:</strong> APAC/SEA Cloud DBaaS 15–20 tỷ USD (2030), Managed Postgres 10–20% share → SAM 1.5–4 tỷ USD.</li>
+                    <li><strong>Target customers:</strong> Startup corridors (Bangkok, Jakarta, Manila), e-commerce cross-border, fintech regional.</li>
+                    <li><strong>Rationale:</strong> Thailand initiative có <strong>Impact/Week = 6.88</strong> (highest trong roadmap), estimated revenue lift 50–100K USD/tháng (base scenario) từ tháng 6–9 sau launch.</li>
+                </ul>
+                <p style="margin-top: 15px; padding: 15px; background-color: rgba(22, 160, 133, 0.1); border-left: 4px solid var(--primary-green); border-radius: 6px;">
+                    <strong>Business Logic:</strong> Deployment View không chỉ trả lời "Kubernetes cluster ở đâu", mà trả lời <strong>"Region này map với miếng thị trường nào, doanh thu bao nhiêu, khi nào break-even"</strong>.
+                </p>
+            </div>
+        </div>
+
+        <!-- Dynamic Views -->
+        <div class="card">
+            <h3>Luồng Hoạt Động Chính (Dynamic Views)</h3>
+            <p>Minh họa các luồng tương tác quan trọng giữa các thành phần của hệ thống.</p>
+
+            <h4>1. Luồng Tạo Instance PostgreSQL</h4>
+            <figure>
+                <div class="mermaid-container">
+                    <!-- prettier-ignore -->
+                    <div class="mermaid">
+sequenceDiagram
+    participant Dev as Backend Developer
+    participant Web as Web Console
+    participant API as API Gateway
+    participant Auth as Auth and IAM Service
+    participant ProvSvc as Provisioning Service
+    participant CP_DB as Control Plane DB
+    participant DP as PostgreSQL Data Plane
+    participant BkpSvc as Backup and Restore Service
+    participant MonSvc as Monitoring and Metrics Service
+
+    Dev->>Web: 1. Gửi form "Create Instance"
+    Web->>API: 2. POST /v1/instances (instance details)
+    API->>Auth: 3. Xác thực và ủy quyền token
+    Auth-->>API: 4. Token hợp lệ
+    API->>ProvSvc: 5. Yêu cầu tạo instance mới
+    ProvSvc->>CP_DB: 6. Tạo record instance (state: PROVISIONING)
+    ProvSvc->>DP: 7. Điều phối hạ tầng tạo DB
+    DP-->>ProvSvc: 8. Instance được tạo thành công
+    ProvSvc->>BkpSvc: 9. Đăng ký instance cho daily backups
+    ProvSvc->>MonSvc: 10. Thêm instance vào scrape targets
+    ProvSvc->>CP_DB: 11. Cập nhật record (state: ACTIVE, connection info)
+    ProvSvc-->>API: 12. Trả về kết quả thành công
+    API-->>Web: 13. Trả về chi tiết instance
+    Web-->>Dev: 14. Hiển thị connection string và trạng thái
+                    </div>
+                </div>
+                <figcaption>Luồng động: Tạo Instance PostgreSQL</figcaption>
+            </figure>
+
+            <h4>2. Luồng Backup & Restore</h4>
+            <figure>
+                <div class="mermaid-container">
+                    <!-- prettier-ignore -->
+                    <div class="mermaid">
+sequenceDiagram
+    participant DevOps as DevOps
+    participant Web as Web Console
+    participant API as API Gateway
+    participant BkpSvc as Backup and Restore Service
+    participant CP_DB as Control Plane DB
+    participant DP as PostgreSQL Data Plane
+    participant BkpStg as Backup Storage
+    participant NotifSvc as Notification Service
+    participant AuditSvc as Audit Logging Service
+
+    DevOps->>Web: 1. Chọn instance, backup và nhấn "Restore"
+    Web->>API: 2. POST /v1/instances/{id}/restore (backup ID)
+    API->>BkpSvc: 3. Yêu cầu restore instance
+    BkpSvc->>CP_DB: 4. Cập nhật instance record (state: RESTORING)
+    BkpSvc->>BkpStg: 5. Lấy dữ liệu backup từ storage
+    BkpStg-->>BkpSvc: 6. Dữ liệu backup được tải
+    BkpSvc->>DP: 7. Phục hồi dữ liệu vào DB instance
+    DP-->>BkpSvc: 8. Instance được phục hồi
+    BkpSvc->>CP_DB: 9. Cập nhật instance record (state: ACTIVE)
+    BkpSvc->>AuditSvc: 10. Ghi log hành động restore
+    BkpSvc->>NotifSvc: 11. Gửi thông báo "Restore Complete"
+    NotifSvc-->>DevOps: 12. DevOps nhận thông báo
+                    </div>
+                </div>
+                <figcaption>Luồng động: Backup & Restore Instance</figcaption>
+            </figure>
+
+            <h4>3. Luồng Tính Cước (Billing Cycle)</h4>
+            <figure>
+                <div class="mermaid-container">
+                    <!-- prettier-ignore -->
+                    <div class="mermaid">
+sequenceDiagram
+    participant Scheduler as Scheduler
+    participant BillSvc as Billing and Subscription Service
+    participant CP_DB as Control Plane DB
+    participant PG as Payment Gateway
+    participant NotifSvc as Notification Service
+    participant CTO as CTO or Founder
+
+    Scheduler->>BillSvc: 1. Kích hoạt chu kỳ tính cước hàng tháng
+    BillSvc->>CP_DB: 2. Lấy dữ liệu sử dụng instance
+    CP_DB-->>BillSvc: 3. Trả về dữ liệu sử dụng và thông tin gói cước
+    BillSvc->>BillSvc: 4. Tính toán chi phí và tạo hóa đơn
+    BillSvc->>PG: 5. Gửi yêu cầu trừ tiền (charge customer)
+    PG-->>BillSvc: 6. Trả về kết quả thanh toán
+    BillSvc->>CP_DB: 7. Cập nhật trạng thái hóa đơn và thanh toán
+    BillSvc->>NotifSvc: 8. Gửi thông báo "Invoice Paid" hoặc "Payment Failed"
+    NotifSvc-->>CTO: 9. CTO nhận thông báo hóa đơn
+                    </div>
+                </div>
+                <figcaption>Luồng động: Chu kỳ tính cước hàng tháng</figcaption>
+            </figure>
+        </div>
+    </section>
+
+    <!-- STRATEGY -->
+    <section id="strategy-detail">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-rocket"></i> Chiến Lược Go-To-Market Chi Tiết</h2>
+            <p>ICP, channel mix, pricing, experiments – cách chúng ta chinh phục thị trường từ zero đến SOM target.</p>
+        </div>
+
+        <!-- Card 1: ICP & Personas -->
+        <div class="card">
+            <h3><i class="fa-solid fa-users"></i> Chân Dung Khách Hàng (ICP) & Personas</h3>
+            <div class="grid-2" style="align-items: start;">
+                <div>
+                    <h4>Định Nghĩa ICP (Ideal Customer Profile)</h4>
+                    <ul style="line-height: 1.9;">
+                        <li><strong>Quy mô:</strong> AI Startups (Seed-Series A), Tech SMEs, Enterprise thử nghiệm AI.</li>
+                        <li><strong>Khu vực:</strong> Việt Nam (70%), Thái Lan/SEA (30%).</li>
+                        <li><strong>Lĩnh vực:</strong> E-commerce, Fintech, Customer Service (BPO), Marketing Agency.</li>
+                        <li><strong>Nỗi đau (Pain points):</strong> Chi phí OpenAI quá cao khi scale, độ trễ (latency) cao, lo ngại dữ liệu bị dùng để train model công khai.</li>
+                        <li><strong>Động lực mua hàng:</strong> Cần privacy, xuất hóa đơn VAT, support tiếng Việt, giá rẻ hơn 30-50%.</li>
+                    </ul>
+                </div>
+                <div>
+                    <h4>3 Personas Chính</h4>
+                    <ol style="line-height: 2;">
+                        <li><strong>AI Engineer / Founder</strong>
+                            <ul style="margin-top: 8px;">
+                                <li><em>POV:</em> "Tôi cần test ý tưởng nhanh (MaaS) rồi fine-tune model riêng (GPU) mà không tốn công setup server."</li>
+                            </ul>
+                        </li>
+                        <li><strong>CTO / Giám Đốc Kỹ Thuật</strong>
+                            <ul style="margin-top: 8px;">
+                                <li><em>POV:</em> "Tôi muốn tích hợp AI vào sản phẩm nhưng phải đảm bảo dữ liệu khách hàng không bị rò rỉ ra nước ngoài."</li>
+                            </ul>
+                        </li>
+                        <li><strong>Purchasing / Finance Manager</strong>
+                            <ul style="margin-top: 8px;">
+                                <li><em>POV:</em> "Tôi cần hóa đơn đỏ (VAT) và báo giá cố định để thanh toán, không dùng thẻ tín dụng cá nhân."</li>
+                            </ul>
+                        </li>
+                    </ol>
+                </div>
+            </div>
+        </div>
+
+        <!-- Card 2: Multi-Channel GTM & CAC -->
+        <div class="card">
+            <h3><i class="fa-solid fa-bullhorn"></i> Multi-Channel GTM & Blended CAC</h3>
+            <table>
+                <thead>
+                    <tr style="background-color: var(--primary-green); color: white;">
+                        <th>Channel</th>
+                        <th>ICP Target</th>
+                        <th>CAC (USD)</th>
+                        <th>Mix (%)</th>
+                        <th>Weighted CAC</th>
+                        <th>Vai Trò Chiến Lược</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>PLG + Cross-sell</strong></td>
+                        <td>Backend, DevOps</td>
+                        <td>100</td>
+                        <td>50</td>
+                        <td>50</td>
+                        <td>Scale base, giảm CAC, tăng activation</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Community + Partnerships</strong></td>
+                        <td>Startup, SME tech</td>
+                        <td>200</td>
+                        <td>30</td>
+                        <td>60</td>
+                        <td>Build trust & brand, referral loop</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Outbound Sales</strong></td>
+                        <td>BFSI, Gov decision-makers</td>
+                        <td>700</td>
+                        <td>20</td>
+                        <td>140</td>
+                        <td>High ACV deals (Enterprise tier)</td>
+                    </tr>
+                    <tr style="background-color: rgba(22, 160, 133, 0.15); font-weight: 600;">
+                        <td colspan="4"><strong>Blended CAC</strong></td>
+                        <td><strong>250</strong></td>
+                        <td>LTV:CAC = 11.9x, Payback = 2.8 tháng</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div style="margin-top: 25px; padding: 20px; background-color: var(--light-gray); border-radius: 12px;">
+                <h4><i class="fa-solid fa-lightbulb"></i> Channel Tactics Chi Tiết</h4>
+                <ul style="line-height: 2;">
+                    <li><strong>PLG:</strong> Free $50 credit, self-serve console, Time-to-first-DB <10 phút, wizard 3–4 bước.</li>
+                    <li><strong>Community:</strong> Tech events (Docker Hanoi, J2TEAM), blog content (so sánh AWS vs GreenNode), pgvector tutorials, Zalo/Telegram support.</li>
+                    <li><strong>Partnerships:</strong> Incubators (Zone Startups, ThinkZone), VNG Ventures portfolio, Zalo Mini App developers.</li>
+                    <li><strong>Outbound:</strong> CFO/CTO outreach cho BFSI/Gov, latency benchmark demo, ND53 compliance deck, VAT invoice pitch.</li>
+                </ul>
+            </div>
+            
+            <div style="margin-top: 30px;">
+                <h3>Visualization: CAC by Channel</h3>
+                <div style="height: 350px;">
+                    <canvas id="cacWaterfallChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Card 2.5: MaaS-led Production Flywheel (NEW) -->
+        <div class="card">
+            <h3>MaaS-led GTM: The "Land & Expand" Engine</h3>
+            <div class="grid-2">
+                <div>
+                    <h4 style="color: var(--primary-green);">Acquisition Strategy (PLG)</h4>
+                    <p>MaaS đóng vai trò là "low-barrier entry point" để acquire developers.</p>
+                    <ul class="feature-list">
+                        <li><strong>Free Tier Strategy:</strong> 1M tokens/tháng miễn phí cho tất cả user đăng ký (đủ để prototype).</li>
+                        <li><strong>Community Growth:</strong> Tài trợ credits cho Hackathons, AI communities (VietAI, GDG).</li>
+                        <li><strong>Content Engine:</strong> Tutorials "How to build RAG with GreenNode MaaS", "Fine-tune Llama 3 on GreenNode".</li>
+                    </ul>
+                </div>
+                <div>
+                    <h4 style="color: #F39C12;">Expansion Mechanism</h4>
+                    <p>Convert free users thành enterprise customers.</p>
+                    <ul class="feature-list">
+                        <li><strong>Usage Triggers:</strong> Auto-email khi user đạt 80% free quota -> offer paid tier.</li>
+                        <li><strong>Feature Gates:</strong> Muốn fine-tune custom model? -> Upgrade sang AI Platform (Paid).</li>
+                        <li><strong>Enterprise Sales:</strong> Support team reach out các account có usage >$500/tháng để offer Enterprise Agreement.</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <div style="margin-top: 30px;">
+                 <h4>AI Use Case Distribution (Target Q3 2025)</h4>
+                 <div style="height: 300px;">
+                    <canvas id="aiUseCaseDistributionChart"></canvas>
+                 </div>
+            </div>
+        </div>
+
+        <!-- Card 3: Pricing & Packaging -->
+        <div class="card">
+            <h3><i class="fa-solid fa-tags"></i> Pricing & Packaging Strategy</h3>
+            <div style="overflow-x: auto;">
+                <table>
+                    <thead>
+                        <tr style="background-color: var(--primary-green); color: white;">
+                            <th style="min-width: 120px;">Gói (Tier)</th>
+                            <th style="min-width: 100px;">Giá (USD)</th>
+                            <th style="min-width: 150px;">Đối Tượng</th>
+                            <th style="min-width: 200px;">Tính Năng Cốt Lõi</th>
+                            <th style="min-width: 200px;">Mục Tiêu Kinh Doanh</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>MaaS Free Tier</strong></td>
+                            <td>$0 / tháng</td>
+                            <td>Developers, Học sinh</td>
+                            <td>1M tokens miễn phí/tháng, 7 Playgrounds, Community support</td>
+                            <td>Acquisition (Thu hút user), PLG entry</td>
+                        </tr>
+                        <tr>
+                            <td><strong>MaaS Pro</strong></td>
+                            <td>Pay-as-you-go</td>
+                            <td>Startups, MVP</td>
+                            <td>$0.15/1M tokens, không giới hạn request, Priority support</td>
+                            <td>Activation & Monetization sớm</td>
+                        </tr>
+                        <tr>
+                            <td><strong>GPU Cloud</strong></td>
+                            <td>Từ $1.20 / giờ</td>
+                            <td>AI Labs, Scale-ups</td>
+                            <td>NVIDIA A100/H100, thanh toán theo giờ, Pre-configured ML stack</td>
+                            <td>Revenue Driver (Tăng trưởng doanh thu)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Enterprise</strong></td>
+                            <td>Custom</td>
+                            <td>Corporatations, Gov</td>
+                            <td>Private Cluster, VPC, SLA 99.95%, Tuân thủ dữ liệu (ND53), 24/7 Support</td>
+                            <td>High ACV, Long-term Lock-in</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div style="margin-top: 25px; padding: 20px; background: linear-gradient(135deg, rgba(22, 160, 133, 0.08), rgba(52, 152, 219, 0.08)); border-radius: 12px;">
+                <h4><i class="fa-solid fa-shield-halved"></i> Bundled Value Prop vs AWS</h4>
+                <ul style="line-height: 2;">
+                    <li><strong>IOPS bundled:</strong> Không tính phí IOPS riêng (AWS RDS IOPS có thể gấp 2–3x instance cost).</li>
+                    <li><strong>Network transfer free (nội địa):</strong> Egress 0 USD trong VNG Cloud ecosystem (AWS egress 0.09 USD/GB).</li>
+                    <li><strong>Predictable bill:</strong> Trọn gói tài nguyên, bill VND, hóa đơn VAT tự động → CFO hài lòng.</li>
+                    <li><strong>Local support:</strong> Zalo/Telegram tiếng Việt, response <4h (AWS support chỉ có English, email-based).</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Card 4: GTM Experiments -->
+        <div class="card">
+            <h3><i class="fa-solid fa-flask"></i> GTM Experiments Canvas</h3>
+            <p>Thể hiện mindset PM: không vẽ chiến lược trên giấy, mà chạy experiment có giả thuyết, metric, timebox.</p>
+            
+            <div style="background-color: var(--light-gray); padding: 20px; border-radius: 12px; margin-bottom: 20px;">
+                <h4 style="color: var(--primary-green); margin-top: 0;">Experiment #1: "Cuộc Chiến Latency"</h4>
+                <p><strong>Hypothesis:</strong> Startup dùng AWS RDS Singapore sẽ migrate sang GreenNode nếu latency giảm ≥5x và có VAT invoice VN.</p>
+                <p><strong>Setup:</strong> Landing page so sánh latency thực tế (công cụ ping trực tiếp: AWS SG vs GreenNode HN/HCM).</p>
+                <p><strong>Success Metric:</strong> ≥20% traffic từ landing page chuyển sang "Create Instance" GreenNode.</p>
+                <p><strong>Timebox:</strong> 4–6 tuần.</p>
+                <p><strong>Learning Goal:</strong> Validate rằng latency & compliance là buying factor mạnh hơn brand AWS.</p>
+            </div>
+
+            <div style="background-color: var(--light-gray); padding: 20px; border-radius: 12px;">
+                <h4 style="color: var(--primary-green); margin-top: 0;">Experiment #2: "Free $50 Credit PLG"</h4>
+                <p><strong>Hypothesis:</strong> Cung cấp $50 credit không điều kiện sẽ tăng conversion rate từ sign-up → first instance lên ≥50%.</p>
+                <p><strong>Setup:</strong> Mỗi sign-up mới nhận $50, valid 30 ngày, chỉ cần email verification (no credit card).</p>
+                <p><strong>Success Metric:</strong> Conversion rate ≥50%, trong đó ≥30% chuyển sang paid tier sau hết credit.</p>
+                <p><strong>Timebox:</strong> 8 tuần.</p>
+                <p><strong>Cost:</strong> ~15–20 USD/user thực tế sử dụng (infra cost), CAC blended kỳ vọng giảm từ 250 → 180 USD nếu thành công.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- FINANCIALS -->
+    <section id="financials" style="background-color: var(--white); padding: 40px 20px; border-radius: 20px; margin-top: 50px;">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-chart-pie"></i> Sức Khỏe Tài Chính & Kinh Tế</h2>
+            <p>Các con số biết nói. Mô hình kinh doanh của GreenNode được xây dựng trên một nền tảng kinh tế đơn vị (Unit Economics) vững chắc.</p>
+        </div>
+        <div class="grid-3">
+            <div class="card kpi-card">
+                <i class="fa-solid fa-sack-dollar"></i>
+                <div class="kpi-label">LTV:CAC Ratio</div>
+                <div class="kpi-value">11.88x</div>
+            </div>
+            <div class="card kpi-card">
+                <i class="fa-solid fa-hourglass-half"></i>
+                <div class="kpi-label">Payback Period</div>
+                <div class="kpi-value">2.78 <span style="font-size: 0.4em;">tháng</span></div>
+            </div>
+            <div class="card kpi-card">
+                <i class="fa-solid fa-hand-holding-heart"></i>
+                <div class="kpi-label">Customer Lifetime</div>
+                <div class="kpi-value">33.3 <span style="font-size: 0.4em;">tháng</span></div>
+            </div>
+        </div>
+        <div class="grid-2" style="margin-top: 30px;">
+            <div class="card" style="height: 350px;"><canvas id="mrrChart"></canvas></div>
+            <div class="card" style="height: 350px;"><canvas id="customerGrowthChart"></canvas></div>
+        </div>
+        
+        <!-- Moved Unit Economics Here -->
+        <div class="card" style="margin-top: 30px; height: 400px;">
+            <h3>Unit Economics Funnel Visualization</h3>
+            <canvas id="unitEconomicsFunnelChart"></canvas>
+        </div>
+
+        <div class="card" style="margin-top: 30px;">
+            <h3>MRR Growth với Customer Dynamics</h3>
+            <div style="height: 400px;">
+                <canvas id="mrrBreakdownChart"></canvas>
+            </div>
+        </div>
+        
+        <!-- NEW: 2026 Financial Targets -->
+        <div class="card" style="margin-top: 30px; border: 2px solid var(--accent-teal);">
+            <h3><i class="fa-solid fa-bullseye"></i> 2026 Financial Targets & Future Goals</h3>
+            <div class="grid-3" style="gap: 20px;">
+                <div style="padding: 20px; text-align: center; background: rgba(52, 152, 219, 0.05); border-radius: 12px;">
+                    <h4 style="color: var(--accent-teal); margin-bottom: 10px;">Target ARR (Exit 2026)</h4>
+                    <div style="font-size: 2.5em; font-weight: 700; color: #2C3E50;">$1.0M</div>
+                    <p style="font-size: 0.9em; color: var(--text-body);">Driven by AI/GPU workloads & MaaS upsell</p>
+                </div>
+                <div style="padding: 20px; text-align: center; background: rgba(22, 160, 133, 0.05); border-radius: 12px;">
+                    <h4 style="color: var(--primary-green); margin-bottom: 10px;">Net Revenue Retention</h4>
+                    <div style="font-size: 2.5em; font-weight: 700; color: #2C3E50;">120%</div>
+                    <p style="font-size: 0.9em; color: var(--text-body);">Deep cross-sell from MaaS to Infra</p>
+                </div>
+                <div style="padding: 20px; text-align: center; background: rgba(231, 76, 60, 0.05); border-radius: 12px;">
+                    <h4 style="color: #E74C3C; margin-bottom: 10px;">Burn Multiple</h4>
+                    <div style="font-size: 2.5em; font-weight: 700; color: #2C3E50;">&lt; 1.5x</div>
+                    <p style="font-size: 0.9em; color: var(--text-body);">Efficient capital usage</p>
+                </div>
+            </div>
+            <div style="margin-top: 25px;">
+                 <h4 style="margin-bottom: 15px;">Upcoming Goals (Q3-Q4 2026)</h4>
+                 <ul style="line-height: 1.8; display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                     <li><i class="fa-solid fa-check" style="color: var(--primary-green);"></i> <strong>Thailand Region Expansion:</strong> Full sovereignty AI Cloud in Bangkok.</li>
+                     <li><i class="fa-solid fa-check" style="color: var(--primary-green);"></i> <strong>Enterprise AI Agent Builder:</strong> Low-code platform for internal business agents.</li>
+                     <li><i class="fa-solid fa-check" style="color: var(--primary-green);"></i> <strong>Serverless GPU Inference:</strong> Pay-per-second H100 inference for sporadic workloads.</li>
+                     <li><i class="fa-solid fa-check" style="color: var(--primary-green);"></i> <strong>SOC2 Type II Compliance:</strong> Preparation for banking/finance enterprise deals.</li>
+                 </ul>
+            </div>
+        </div>
+
+        <div class="card" style="height: 350px;"><canvas id="marketSizingChart"></canvas></div>
+    </section>
+
+    <!-- KPI & OKRs -->
+    <section id="kpi-okrs">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-gauge-high"></i> Hệ Thống KPI & OKRs: Đo Lường Thành Công</h2>
+            <p>Framework đo lường toàn diện từ Product Health đến Revenue, thể hiện tư duy data-driven của PM.</p>
+        </div>
+
+        <!-- Card 1: 5 Nhóm KPI Core -->
+        <div class="card">
+            <h3>5 Nhóm KPI Core (Giai Đoạn T0–T1)</h3>
+            <div class="grid-2" style="gap: 20px;">
+                <div style="padding: 20px; background: linear-gradient(135deg, rgba(22, 160, 133, 0.08), rgba(255,255,255,0)); border-left: 4px solid var(--primary-green); border-radius: 8px;">
+                    <h4><i class="fa-solid fa-check-circle"></i> 1. PMF & Adoption (T0: 3–6 tháng)</h4>
+                    <ul style="line-height: 2;">
+                        <li>≥ 20 khách hàng B2B active (≥1 prod instance)</li>
+                        <li>≥ 100 PostgreSQL instances active (dev+test+prod)</li>
+                        <li>NPS ≥ 40</li>
+                        <li>Churn < 5%/quý (prod workload)</li>
+                    </ul>
+                </div>
+
+                <div style="padding: 20px; background: linear-gradient(135deg, rgba(52, 152, 219, 0.08), rgba(255,255,255,0)); border-left: 4px solid var(--accent-blue); border-radius: 8px;">
+                    <h4><i class="fa-solid fa-rocket"></i> 2. Activation & Developer Experience</h4>
+                    <ul style="line-height: 2;">
+                        <li>Time-to-first-DB < 10 phút với ≥80% user mới (stretch: <5 phút)</li>
+                        <li>Sign-up → first instance conversion ≥ 50%</li>
+                        <li>≥50% khách hàng báo cáo "tiết kiệm ≥50% thời gian vận hành DB"</li>
+                    </ul>
+                </div>
+
+                <div style="padding: 20px; background: linear-gradient(135deg, rgba(243, 156, 18, 0.08), rgba(255,255,255,0)); border-left: 4px solid #F39C12; border-radius: 8px;">
+                    <h4><i class="fa-solid fa-dollar-sign"></i> 3. Financial & Unit Economics</h4>
+                    <ul style="line-height: 2;">
+                        <li>MRR: 1,350 USD (M1) → 27,600 USD (M12)</li>
+                        <li>ARPU: ~150 USD/tháng</li>
+                        <li>LTV: ~2,970 USD</li>
+                        <li>Blended CAC: ~250 USD</li>
+                        <li><strong>LTV:CAC: 11.9x (rất khỏe mạnh)</strong></li>
+                        <li><strong>Payback period: 2.8 tháng (nhanh)</strong></li>
+                    </ul>
+                </div>
+
+                <div style="padding: 20px; background: linear-gradient(135deg, rgba(155, 89, 182, 0.08), rgba(255,255,255,0)); border-left: 4px solid #9B59B6; border-radius: 8px;">
+                    <h4><i class="fa-solid fa-microchip"></i> 4. AI & Product Differentiation</h4>
+                    <ul style="line-height: 2;">
+                        <li><strong>AI Adoption Rate:</strong> ≥20% DB instances bật pgvector (RAG/Vector Search use case)</li>
+                        <li>Cross-sell GPU H100: ≥10% khách hàng AI workload upsell sang GPU cluster</li>
+                    </ul>
+                </div>
+
+                <div style="padding: 20px; background: linear-gradient(135deg, rgba(231, 76, 60, 0.08), rgba(255,255,255,0)); border-left: 4px solid #E74C3C; border-radius: 8px;">
+                    <h4><i class="fa-solid fa-shield-halved"></i> 5. Reliability & Compliance</h4>
+                    <ul style="line-height: 2;">
+                        <li>Platform uptime: target <strong>99.5%</strong> (MVP) → 99.95%</li>
+                        <li><strong>0 incident mất dữ liệu</strong> do lỗi infra/backup/restore</li>
+                        <li>0 incident Severity ≥2 do lỗi DBaaS trong T0–T1</li>
+                        <li>% khách hàng ngành regulated (BFSI, Gov, Fintech) tuân thủ ND53: 100%</li>
+                    </ul>
+                </div>
+
+                <div style="padding: 20px; background: linear-gradient(135deg, rgba(26, 188, 156, 0.08), rgba(255,255,255,0)); border-left: 4px solid #1ABC9C; border-radius: 8px;">
+                    <h4><i class="fa-solid fa-chart-line"></i> Bonus: Growth & Expansion</h4>
+                    <ul style="line-height: 2;">
+                        <li>NRR (Net Revenue Retention): target >100% (cross-sell, upsell)</li>
+                        <li>Month-to-Month customer growth: +10–15% organic</li>
+                        <li>Thailand region (Q2 launch): target 10–15 customers, 500–1K USD MRR tháng đầu</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Card 1.5: AI-Specific KPIs (NEW) -->
+        <div class="card">
+            <h3>AI Platform & MaaS Health Metrics</h3>
+            <div class="grid-4">
+                <div style="text-align: center; padding: 20px; background: rgba(22, 160, 133, 0.05); border-radius: 12px;">
+                    <div style="font-size: 2.5em; font-weight: 700; color: var(--primary-green);">35%</div>
+                    <div style="margin-top: 10px; font-size: 0.9em;">MaaS MoM Growth<br/>(Token Usage)</div>
+                </div>
+                <div style="text-align: center; padding: 20px; background: rgba(52, 152, 219, 0.05); border-radius: 12px;">
+                    <div style="font-size: 2.5em; font-weight: 700; color: var(--accent-teal);">40%</div>
+                    <div style="margin-top: 10px; font-size: 0.9em;">Conversion Rate<br/>(Free to Paid)</div>
+                </div>
+                <div style="text-align: center; padding: 20px; background: rgba(243, 156, 18, 0.05); border-radius: 12px;">
+                    <div style="font-size: 2.5em; font-weight: 700; color: #F39C12;">15%</div>
+                    <div style="margin-top: 10px; font-size: 0.9em;">Cross-sell Rate<br/>(MaaS → GPU Cloud)</div>
+                </div>
+                <div style="text-align: center; padding: 20px; background: rgba(231, 76, 60, 0.05); border-radius: 12px;">
+                    <div style="font-size: 2.5em; font-weight: 700; color: #E74C3C;"><7d</div>
+                    <div style="margin-top: 10px; font-size: 0.9em;">Time to Activation<br/>(Sign up → First API Call)</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Card 2: OKRs Q1 Example -->
+        <div class="card">
+            <h3>OKRs Q1 2026 (Example)</h3>
+            <div style="padding: 25px; background-color: var(--light-gray); border-radius: 12px;">
+                <h4 style="color: var(--primary-green); margin-top: 0;">Objective 1: Đạt Product-Market Fit & Stability Baseline</h4>
+                <ul style="line-height: 2.2;">
+                    <li><strong>KR1:</strong> 100 customers active (any tier), trong đó ≥20 customers có ≥1 prod instance.</li>
+                    <li><strong>KR2:</strong> Platform uptime ≥99.5%, 0 incident mất dữ liệu.</li>
+                    <li><strong>KR3:</strong> NPS ≥40, churn <5%/quý.</li>
+                </ul>
+
+                <h4 style="color: var(--accent-blue); margin-top: 25px;">Objective 2: Tối Ưu Acquisition & Activation Funnel</h4>
+                <ul style="line-height: 2.2;">
+                    <li><strong>KR1:</strong> 300 sign-ups trong Q1.</li>
+                    <li><strong>KR2:</strong> ≥50% conversion rate từ sign-up → first instance created.</li>
+                    <li><strong>KR3:</strong> Blended CAC ≤250 USD (PLG 100, Community 200, Outbound 700).</li>
+                </ul>
+
+                <h4 style="color: #F39C12; margin-top: 25px;">Objective 3: Thiết Lập Nền Tảng Tài Chính Khỏe Mạnh</h4>
+                <ul style="line-height: 2.2;">
+                    <li><strong>KR1:</strong> MRR đạt 15,000 USD cuối Q1.</li>
+                    <li><strong>KR2:</strong> ARPU ≥150 USD/tháng.</li>
+                    <li><strong>KR3:</strong> LTV:CAC ratio ≥10x, payback period ≤3 tháng.</li>
+                </ul>
+            </div>
+        </div>
+
+
+
+        <!-- Card 3: 4 Dashboards -->
+        <div class="card">
+            <h3>4 Dashboards Theo Dõi (PM Toolkit)</h3>
+            <div class="grid-2">
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px;">
+                    <h4 style="color: var(--primary-green);">📊 Dashboard 1: Product Health</h4>
+                    <ul style="line-height: 1.9;">
+                        <li>Active instances (dev/test/prod breakdown)</li>
+                        <li>Time-to-first-DB (median, p90)</li>
+                        <li>Activation rate (sign-up → first instance %)</li>
+                        <li>Feature adoption (backup ON %, pgvector enabled %)</li>
+                        <li>Platform uptime</li>
+                    </ul>
+                </div>
+
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px;">
+                    <h4 style="color: var(--accent-blue);">📈 Dashboard 2: Customer & Growth</h4>
+                    <ul style="line-height: 1.9;">
+                        <li>New sign-ups, new customers (paid)</li>
+                        <li>Churn rate (% và absolute count)</li>
+                        <li>NPS score & trend</li>
+                        <li>Cohort retention (M1, M3, M6)</li>
+                        <li>Channel mix & source breakdown</li>
+                    </ul>
+                </div>
+
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px;">
+                    <h4 style="color: #F39C12;">💰 Dashboard 3: Revenue & Economics</h4>
+                    <ul style="line-height: 1.9;">
+                        <li>MRR, ARR</li>
+                        <li>ARPU by tier</li>
+                        <li>LTV, CAC (blended & by channel)</li>
+                        <li>LTV:CAC ratio, payback period</li>
+                        <li>NRR (Net Revenue Retention)</li>
+                    </ul>
+                </div>
+
+                <div style="padding: 20px; border: 2px solid var(--border-color); border-radius: 12px;">
+                    <h4 style="color: #E74C3C;">🛠️ Dashboard 4: Operations & Support</h4>
+                    <ul style="line-height: 1.9;">
+                        <li>Incident count (Severity 1/2/3)</li>
+                        <li>MTTR (Mean Time To Resolution)</li>
+                        <li>Support ticket volume & response time</li>
+                        <li>Backup success rate, restore test frequency</li>
+                        <li>Customer-reported "data loss" events: target 0</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ROADMAP -->
+    <section id="roadmap">
+        <div class="section-title">
+            <h2><i class="fa-solid fa-road"></i> Lộ Trình Phát Triển Sản Phẩm</h2>
+            <p>Một lộ trình trực quan hóa bằng sơ đồ Gantt, thể hiện các sáng kiến chiến lược được ưu tiên để tối đa hóa tác động.</p>
+        </div>
+        <div class="card">
+            <div class="mermaid-container">
+                <!-- prettier-ignore -->
+                <div class="mermaid">
+gantt
+    title Lộ Trình Phát Triển GreenNode
+    dateFormat YYYY-MM-DD
+
+    section Quý 1
+    HA_Multi_AZ           :crit, done, 2026-01-01, 12w
+    PITR_phut_gio         :done, 2026-01-15, 4w
+    Advanced_Monitoring   :active, 2026-02-01, 3w
+    Alert_Customization   :active, 2026-02-15, 2w
+
+    section Quý 2
+    Thailand_Region       :crit, 2026-04-01, 8w
+    Read_Replicas         :2026-04-10, 5w
+    MySQL_DBAAS           :2026-05-01, 6w
+    VPC_Peering           :2026-05-15, 4w
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+
+
+<script>
+    // --- Initialize Mermaid ---
+    mermaid.initialize({
+        startOnLoad: true,
+        theme: 'base',
+        themeVariables: {
+            primaryColor: '#ffffff',
+            primaryTextColor: '#1a1d20',
+            primaryBorderColor: '#0F5132',
+            lineColor: '#6c757d',
+            textColor: '#1a1d20',
+            mainBkg: '#ffffff',
+            edgeLabelBackground: '#f8f9fa',
+            clusterBkg: '#f8f9fa',
+            fontSize: '15px',
+            fontFamily: '"Be Vietnam Pro", sans-serif'
+        },
+        flowchart: { curve: 'basis' }
+    });
+
+    // --- Data ---
+    const financialProjections = [
+        { Month: 1, MRR: 5000, New: 15, Churned: 0 },
+        { Month: 2, MRR: 8500, New: 20, Churned: 0 },
+        { Month: 3, MRR: 12500, New: 25, Churned: 1 },
+        { Month: 4, MRR: 18000, New: 30, Churned: 1 },
+        { Month: 5, MRR: 24500, New: 35, Churned: 2 },
+        { Month: 6, MRR: 32000, New: 40, Churned: 2 },
+        { Month: 7, MRR: 40500, New: 45, Churned: 3 },
+        { Month: 8, MRR: 50000, New: 50, Churned: 3 },
+        { Month: 9, MRR: 60500, New: 55, Churned: 4 },
+        { Month: 10, MRR: 72000, New: 60, Churned: 4 },
+        { Month: 11, MRR: 84500, New: 65, Churned: 5 },
+        { Month: 12, MRR: 98000, New: 70, Churned: 5 }
+    ];
+
+    const marketProjectionData = [
+        { Year: '2023-26', Value: 55 }, 
+        { Year: '2030', Value: 223 },
+        { Year: '2032', Value: 360 }, 
+        { Year: '2034', Value: 481 }  
+    ];
+
+    document.addEventListener('DOMContentLoaded', function() {
+        // --- 1. UI Interactions & Animations ---
+        const animatedCards = document.querySelectorAll('.card');
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('is-visible');
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.1 });
+        animatedCards.forEach(card => observer.observe(card));
+
+        // Focus Mode Backdrop
+        const backdrop = document.createElement('div');
+        backdrop.className = 'backdrop';
+        document.body.appendChild(backdrop);
+
+        document.querySelectorAll('.card').forEach(card => {
+            card.addEventListener('click', (e) => {
+                if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON' || document.body.classList.contains('presentation-active')) return;
+                
+                const isFocused = card.classList.contains('is-focused');
+                document.querySelectorAll('.card.is-focused').forEach(c => c.classList.remove('is-focused'));
+                
+                if (!isFocused) {
+                    card.classList.add('is-focused');
+                    backdrop.classList.add('is-active');
+                    document.body.classList.add('has-focused-card');
+                } else {
+                    backdrop.classList.remove('is-active');
+                    document.body.classList.remove('has-focused-card');
+                }
+            });
+        });
+
+        backdrop.addEventListener('click', () => {
+            document.querySelectorAll('.card.is-focused').forEach(c => c.classList.remove('is-focused'));
+            backdrop.classList.remove('is-active');
+            document.body.classList.remove('has-focused-card');
+        });
+
+        // --- 2. Presentation Mode Logic ---
+        const startBtn = document.getElementById('start-presentation-btn');
+        const presentationNav = document.getElementById('presentation-nav');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+        const exitBtn = document.getElementById('exit-btn');
+        const slideCounter = document.getElementById('slide-counter');
+        const endScreen = document.getElementById('end-screen');
+        const restartBtn = document.getElementById('restart-btn');
+        const body = document.body;
+
+        let presentationModeActive = false;
+        let currentSlideIndex = 0;
+        let slides = [];
+
+        function collectSlides() {
+            slides = [];
+            const heroContent = document.querySelector('#hero-ai-first .container');
+            if (heroContent) slides.push(heroContent);
+            const others = document.querySelectorAll('.section-title, .card');
+            others.forEach(el => slides.push(el));
+        }
+
+        function focusSlide(index) {
+            slides.forEach(s => s.classList.remove('slide-active'));
+            if (slides[index]) {
+                slides[index].classList.add('slide-active');
+                slides[index].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                slideCounter.textContent = `${index + 1} / ${slides.length}`;
+            }
+        }
+
+        function startPresentation() {
+            collectSlides();
+            if (slides.length === 0) return;
+            presentationModeActive = true;
+            body.classList.add('presentation-active');
+            startBtn.style.display = 'none';
+            presentationNav.style.display = 'flex';
+            currentSlideIndex = 0;
+            focusSlide(0);
+        }
+
+        function endPresentation() {
+            presentationModeActive = false;
+            body.classList.remove('presentation-active');
+            slides.forEach(s => s.classList.remove('slide-active'));
+            startBtn.style.display = 'flex';
+            presentationNav.style.display = 'none';
+            endScreen.classList.remove('active');
+        }
+
+        function showEndScreen() {
+            slides.forEach(s => s.classList.remove('slide-active'));
+            endScreen.classList.add('active');
+        }
+
+        function handleKeyNav(e) {
+            if (!presentationModeActive) return;
+            if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === 'Space') {
+                e.preventDefault();
+                if (currentSlideIndex < slides.length - 1) {
+                    currentSlideIndex++;
+                    focusSlide(currentSlideIndex);
+                } else { showEndScreen(); }
+            } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (endScreen.classList.contains('active')) {
+                    endScreen.classList.remove('active');
+                    focusSlide(currentSlideIndex);
+                } else if (currentSlideIndex > 0) {
+                    currentSlideIndex--;
+                    focusSlide(currentSlideIndex);
+                }
+            } else if (e.key === 'Escape') { endPresentation(); }
+        }
+
+        startBtn.addEventListener('click', startPresentation);
+        exitBtn.addEventListener('click', endPresentation);
+        restartBtn.addEventListener('click', () => { endScreen.classList.remove('active'); currentSlideIndex = 0; focusSlide(0); });
+        nextBtn.addEventListener('click', () => { if (currentSlideIndex < slides.length - 1) { currentSlideIndex++; focusSlide(currentSlideIndex); } else { showEndScreen(); } });
+        prevBtn.addEventListener('click', () => { if (endScreen.classList.contains('active')) { endScreen.classList.remove('active'); focusSlide(currentSlideIndex); } else if (currentSlideIndex > 0) { currentSlideIndex--; focusSlide(currentSlideIndex); } });
+        document.addEventListener('keydown', handleKeyNav);
+
+        // --- 3. Chart Initializations ---
+        Chart.defaults.font.family = '"Be Vietnam Pro", sans-serif';
+        const chartOptions = (title) => ({
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'bottom', labels: { usePointStyle: true, padding: 20 } },
+                title: { display: true, text: title, font: { size: 16, weight: '700' }, padding: 20 }
+            }
+        });
+
+        new Chart(document.getElementById('mrrChart'), {
+            type: 'line',
+            data: {
+                labels: financialProjections.map(d => `T${d.Month}`),
+                datasets: [{
+                    label: 'MRR (USD)', data: financialProjections.map(d => d.MRR),
+                    borderColor: '#0F5132', backgroundColor: 'rgba(15, 81, 50, 0.1)',
+                    fill: true, tension: 0.4
+                }]
+            },
+            options: chartOptions('Dự Báo Tăng Trưởng MRR (12 Tháng)')
+        });
+
+        new Chart(document.getElementById('marketProjectionChart'), {
+            type: 'bar',
+            data: {
+                labels: marketProjectionData.map(d => d.Year),
+                datasets: [{
+                    label: 'Thị trường AI Infrastructure (Tỷ USD)',
+                    data: marketProjectionData.map(d => d.Value),
+                    backgroundColor: '#16A085', borderRadius: 8
+                }]
+            },
+            options: {
+                ...chartOptions('Dự báo Market Size AI Infrastructure Toàn cầu'),
+                scales: { y: { beginAtZero: true, title: { display: true, text: 'Tỷ USD' } } }
+            }
+        });
+
+        new Chart(document.getElementById('developerJourneyChart'), {
+            type: 'bar',
+            data: {
+                labels: ['Experiment', 'Customize', 'Scale'],
+                datasets: [{
+                    label: 'Efficiency Gain (%)', data: [40, 60, 85],
+                    backgroundColor: ['#F39C12', '#3498DB', '#9B59B6'], borderRadius: 8
+                }]
+            },
+            options: chartOptions('Efficiency Boost per Phase')
+        });
+
+        new Chart(document.getElementById('gpuBenchmarkChart'), {
+            type: 'bar',
+            data: {
+                labels: ['Training', 'Inference', 'Cost Efficiency'],
+                datasets: [
+                    { label: 'GreenNode (H100)', data: [100, 100, 100], backgroundColor: '#16A085' },
+                    { label: 'Hyperscalers', data: [85, 70, 65], backgroundColor: '#BDC3C7' }
+                ]
+            },
+            options: { ...chartOptions('Performance Score (Rel. to H100)'), indexAxis: 'y' }
+        });
+
+        new Chart(document.getElementById('maasComparisonChart'), {
+            type: 'radar',
+            data: {
+                labels: ['Latency', 'Cost', 'Privacy', 'Model Variety', 'Local Support'],
+                datasets: [
+                    { label: 'GreenNode', data: [95, 90, 100, 85, 95], borderColor: '#16A085', backgroundColor: 'rgba(22, 160, 133, 0.2)' },
+                    { label: 'Others', data: [60, 80, 50, 70, 40], borderColor: '#3498DB', backgroundColor: 'rgba(52, 152, 219, 0.2)' }
+                ]
+            },
+            options: chartOptions('Regional Advantage Matrix')
+        });
+    });
+</script>
+</body>
+</html>
